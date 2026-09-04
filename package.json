@@ -1,0 +1,63 @@
+{
+  "name": "@pify/subagent",
+  "version": "0.1.0",
+  "description": "Spawn scoped subagents from within a pi session: agent_run/agent_result tools, Claude Code-compatible agent types, turn caps and tool allowlists",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "pify",
+    "subagent",
+    "agents"
+  ],
+  "homepage": "https://github.com/pifydev/subagent#readme",
+  "bugs": {
+    "url": "https://github.com/pifydev/subagent/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pifydev/subagent.git"
+  },
+  "license": "MIT",
+  "author": "Pify maintainers",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "extensions",
+    "src",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": ["./extensions/subagent.ts"],
+    "skills": ["./skills"]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "prepublishOnly": "npm run typecheck && npm test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": { "optional": true },
+    "@earendil-works/pi-tui": { "optional": true },
+    "typebox": { "optional": true }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.4",
+    "@earendil-works/pi-tui": "^0.84.4",
+    "@types/node": "^22.10.2",
+    "typebox": "^1.1.38",
+    "typescript": "^5.7.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
