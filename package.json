@@ -1,6 +1,6 @@
 {
   "name": "@pify/subagent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Spawn scoped subagents from within a pi session: agent_run/agent_result tools, Claude Code-compatible agent types, turn caps and tool allowlists",
   "keywords": [
     "pi-package",
@@ -32,8 +32,12 @@
     "LICENSE"
   ],
   "pi": {
-    "extensions": ["./extensions/subagent.ts"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./extensions/subagent.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -46,9 +50,15 @@
     "typebox": "*"
   },
   "peerDependenciesMeta": {
-    "@earendil-works/pi-coding-agent": { "optional": true },
-    "@earendil-works/pi-tui": { "optional": true },
-    "typebox": { "optional": true }
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.84.4",
