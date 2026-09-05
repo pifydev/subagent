@@ -29,6 +29,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import { loadAgentDefs } from "../src/defs.ts";
+import { createIsolationWorktree, isolationNote, type Isolation } from "../src/isolate.ts";
 import { CHILD_FRAMING, buildTaskPrompt, describeDefs, formatRunResult } from "../src/prompts.ts";
 import { buildWidgetLines } from "../src/widget.ts";
 import {
@@ -44,6 +45,22 @@ type UiContext = ExtensionContext;
 
 export default function subagent(pi: ExtensionAPI) {
   let defs = new Map<string, AgentDef>();
+  // v0.2 queue: children beyond the cap wait for a slot instead of failing.
+  let slotsInUse = 0;
+  const slotWaiters: Array<() => void> = [];
+  async function acquireSlot(): Promise<void> {
+    if (slotsInUse < MAX_CONCURRENT_BACKGROUND) {
+      slotsInUse++;
+      return;
+    }
+    await new Promise<void>((resolve) => slotWaiters.push(resolve));
+    slotsInUse++;
+  }
+  function releaseSlot(): void {
+    slotsInUse--;
+    const next = slotWaiters.shift();
+    if (next) next();
+  }
   const runs = new Map<string, RunState>();
   const counters = new Map<string, number>();
   let lastUiCtx: UiContext | null = null;
@@ -81,7 +98,7 @@ export default function subagent(pi: ExtensionAPI) {
     return `${agent}-${n}`;
   }
 
-  async function runChild(ctx: UiContext, def: AgentDef, run: RunState): Promise<void> {
+  async function runChild(ctx: UiContext, def: AgentDef, run: RunState, workDir?: string): Promise<void> {
     let session: AgentSession | null = null;
     let unsubscribe: (() => void) | null = null;
     try {
@@ -102,12 +119,12 @@ export default function subagent(pi: ExtensionAPI) {
       };
       const promptOptions = promptHost.getSystemPromptOptions?.() ?? {};
       const created = await createAgentSession({
-        sessionManager: SessionManager.inMemory(ctx.cwd),
+        sessionManager: SessionManager.inMemory(workDir ?? ctx.cwd),
         model,
         thinkingLevel: (def.thinking ?? pi.getThinkingLevel()) as never,
         tools: def.tools,
         resourceLoader: new DefaultResourceLoader({
-          cwd: ctx.cwd,
+          cwd: workDir ?? ctx.cwd,
           agentDir: getAgentDir(),
           noExtensions: true,
           noPromptTemplates: true,
@@ -186,15 +203,18 @@ export default function subagent(pi: ExtensionAPI) {
       "(read-only exploration/research), worker (full tools, implements a task), or a custom type " +
       "from .pi/agents/. background=false (default) blocks and returns the child's report; " +
       "background=true returns an id immediately — collect it later with agent_result. " +
-      "Write the task as a complete, self-contained brief: the child sees none of this conversation.",
+      "Write the task as a complete, self-contained brief: the child sees none of this conversation. " +
+      "For MUTATING tasks set isolation=worktree: the child gets its own git worktree and branch, the " +
+      "main checkout stays untouched, and the report says how to merge or discard.",
     parameters: Type.Object({
       agent: Type.String({ description: "Agent type name" }),
       task: Type.String({ description: "Complete task brief for the child" }),
       background: Type.Optional(Type.Boolean({ description: "Run without blocking (default false)" })),
+      isolation: Type.Optional(Type.String({ description: "Set to worktree to run in an isolated git worktree (for mutating tasks)" })),
     }),
     async execute(
       _id,
-      params: { agent: string; task: string; background?: boolean },
+      params: { agent: string; task: string; background?: boolean; isolation?: string },
       _signal,
       _onUpdate,
       ctx,
@@ -209,15 +229,16 @@ export default function subagent(pi: ExtensionAPI) {
 
       const uiCtx = ctx as UiContext;
       const background = params.background === true;
-      const active = [...runs.values()].filter((r) => r.status === "running").length;
-      if (background && active >= MAX_CONCURRENT_BACKGROUND) {
-        throw new Error(
-          `Too many background agents running (${active}/${MAX_CONCURRENT_BACKGROUND}). Collect results first or run foreground.`,
-        );
+
+      // v0.2: worktree isolation for mutating children — its own branch and
+      // checkout under ~/.worktrees/, never touching the main tree.
+      let isolation: Isolation | null = null;
+      if (params.isolation === "worktree") {
+        isolation = createIsolationWorktree(uiCtx.cwd, nextId(def.name));
       }
 
       const run: RunState = {
-        id: nextId(def.name),
+        id: isolation ? isolation.branch.replace(/^agent\//, "") : nextId(def.name),
         agent: def.name,
         task: params.task.trim(),
         background,
@@ -232,22 +253,35 @@ export default function subagent(pi: ExtensionAPI) {
       runs.set(run.id, run);
       renderWidget(uiCtx);
 
+      const runIt = async () => {
+        await acquireSlot();
+        try {
+          await runChild(uiCtx, def, run, isolation?.path);
+        } finally {
+          releaseSlot();
+        }
+        if (isolation && run.result !== null) {
+          run.result = `${run.result}\n\n${isolationNote(isolation)}`;
+        }
+      };
+
       if (background) {
-        void runChild(uiCtx, def, run).then(() => {
+        // v0.2: beyond the concurrency cap runs queue instead of rejecting.
+        void runIt().then(() => {
           notify(uiCtx, `subagent ${run.id}: ${run.status}`, run.status === "done" ? "info" : "warning");
         });
         return {
           content: [
             { type: "text", text: `Started ${run.id} in the background. Collect with agent_result id="${run.id}".` },
           ],
-          details: { id: run.id },
+          details: { id: run.id, worktree: isolation?.path ?? null },
         };
       }
 
-      await runChild(uiCtx, def, run);
+      await runIt();
       return {
         content: [{ type: "text", text: formatRunResult(run) }],
-        details: { id: run.id, status: run.status, tokens: run.tokens },
+        details: { id: run.id, status: run.status, tokens: run.tokens, worktree: isolation?.path ?? null },
       };
     },
   });

@@ -155,3 +155,53 @@ test("describeDefs lists name, source, tools", () => {
   assert.ok(text.includes("scout (builtin)"));
   assert.ok(text.includes("read, grep, find, ls"));
 });
+
+test("v0.2 isolation: worktree created on a real repo; slug sanitized", async () => {
+  const { createIsolationWorktree, sanitizeSlug, isolationNote } = await import("../src/isolate.ts");
+  const { execFileSync } = await import("node:child_process");
+
+  assert.equal(sanitizeSlug("Reviewer-1"), "reviewer-1");
+  assert.equal(sanitizeSlug("weird !! name"), "weird-name");
+  assert.equal(sanitizeSlug("!!!"), "run");
+
+  const repo = mkdtempSync(join(tmpdir(), "pify-sub-iso-"));
+  let wtPath: string | null = null;
+  try {
+    const run = (...args: string[]) =>
+      execFileSync("git", args, { cwd: repo, encoding: "utf8", windowsHide: true });
+    run("init", "-b", "main");
+    run("config", "user.email", "t@t.t");
+    run("config", "user.name", "t");
+    writeFileSync(join(repo, "a.txt"), "x\n");
+    run("add", ".");
+    run("commit", "-m", "init");
+
+    const iso = createIsolationWorktree(repo, "worker-1");
+    wtPath = iso.path;
+    assert.equal(iso.branch, "agent/worker-1");
+    assert.ok(iso.path.replaceAll("\\", "/").includes("/.worktrees/"));
+    const branches = run("branch", "--list", "agent/worker-1");
+    assert.ok(branches.includes("agent/worker-1"));
+
+    // second isolation with the same slug gets a fresh slot
+    const iso2 = createIsolationWorktree(repo, "worker-1");
+    assert.notEqual(iso2.path, iso.path);
+    assert.equal(iso2.branch, "agent/worker-1-2");
+    rmSync(iso2.path, { recursive: true, force: true });
+
+    assert.ok(isolationNote(iso).includes("worktree_merge"));
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+    if (wtPath) rmSync(wtPath, { recursive: true, force: true });
+  }
+});
+
+test("v0.2 isolation refuses outside a git repo", async () => {
+  const { createIsolationWorktree } = await import("../src/isolate.ts");
+  const dir = mkdtempSync(join(tmpdir(), "pify-sub-nogit-"));
+  try {
+    assert.throws(() => createIsolationWorktree(dir, "x"), /git repository/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
