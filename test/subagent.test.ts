@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAgentFile } from "../src/frontmatter.ts";
+import { buildMentionMessage, findMentions } from "../src/mentions.ts";
 import { BUILTIN_AGENTS } from "../src/builtin.ts";
 import { loadAgentDefs } from "../src/defs.ts";
 import { buildWidgetLines } from "../src/widget.ts";
@@ -235,4 +236,39 @@ test("v0.3 builtin agents keep the defaults", () => {
     assert.equal(def.systemPromptMode, "append", name);
     assert.equal(def.inheritSkills, true, name);
   }
+});
+
+test("v0.4 @mentions are found at word boundaries only", () => {
+  const known = ["reviewer", "scout", "worker"];
+  assert.deepEqual(findMentions("@reviewer check the diff", known), ["reviewer"]);
+  assert.deepEqual(findMentions("ask @scout and @reviewer to look", known), ["scout", "reviewer"]);
+  assert.deepEqual(findMentions("(@worker) should do it", known), ["worker"]);
+  assert.deepEqual(findMentions("@Reviewer in caps", known), ["reviewer"]);
+  assert.deepEqual(findMentions("@scout, then @scout again", known), ["scout"], "deduped");
+  assert.deepEqual(findMentions("tell @reviewer.", known), ["reviewer"], "trailing punctuation");
+
+  // not mentions
+  assert.deepEqual(findMentions("mail me@reviewer.com", known), []);
+  assert.deepEqual(findMentions("see src/@reviewer/file.ts", known), []);
+  assert.deepEqual(findMentions("@nobody knows", known), []);
+  assert.deepEqual(findMentions("plain prompt", known), []);
+  assert.deepEqual(findMentions("", known), []);
+  assert.deepEqual(findMentions("@reviewer", []), []);
+});
+
+test("v0.4 the mention message names each agent and forbids merging", () => {
+  const one = buildMentionMessage([{ name: "reviewer", description: "Reviews diffs" }]);
+  assert.ok(one.includes("<system-reminder>"));
+  assert.ok(one.includes("- reviewer: Reviews diffs"));
+  assert.ok(one.includes('agent_run call with agent="reviewer"'));
+  assert.ok(one.includes("do not mention it to the user"));
+
+  const two = buildMentionMessage([
+    { name: "reviewer", description: "Reviews diffs" },
+    { name: "scout", description: "" },
+  ]);
+  assert.ok(two.includes("two agent_run calls"));
+  assert.ok(two.includes('agent="reviewer"') && two.includes('agent="scout"'));
+  assert.ok(two.includes("(no description)"));
+  assert.ok(two.includes("Do not merge separate agents into one call"));
 });

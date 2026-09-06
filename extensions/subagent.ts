@@ -29,6 +29,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import { loadAgentDefs } from "../src/defs.ts";
+import { buildMentionMessage, findMentions } from "../src/mentions.ts";
 import { createIsolationWorktree, isolationNote, type Isolation } from "../src/isolate.ts";
 import { CHILD_FRAMING, buildTaskPrompt, describeDefs, formatRunResult } from "../src/prompts.ts";
 import { buildWidgetLines } from "../src/widget.ts";
@@ -40,6 +41,7 @@ import {
 } from "../src/types.ts";
 
 const RESULT_ENTRY = "subagent-result";
+const MENTION_ENTRY = "subagent-mention";
 
 type UiContext = ExtensionContext;
 
@@ -314,6 +316,29 @@ export default function subagent(pi: ExtensionAPI) {
   });
 
   // ── Lifecycle ────────────────────────────────────────────────────────
+
+  /**
+   * `@reviewer look at the diff` delegates without anyone describing the
+   * agent roster to the model. The instruction rides with the turn as a
+   * custom message rather than as a system-prompt edit: the prefix stays
+   * byte-identical, so the prompt cache survives the turn that is about to
+   * fan out.
+   */
+  pi.on("before_agent_start", async (event) => {
+    const prompt = (event as { prompt?: unknown }).prompt;
+    if (typeof prompt !== "string" || defs.size === 0) return undefined;
+    const mentioned = findMentions(prompt, [...defs.keys()]);
+    if (mentioned.length === 0) return undefined;
+    return {
+      message: {
+        customType: MENTION_ENTRY,
+        content: buildMentionMessage(
+          mentioned.map((name) => ({ name, description: defs.get(name)?.description ?? "" })),
+        ),
+        display: false,
+      },
+    };
+  });
 
   pi.on("session_start", async (_event, ctx) => {
     defs = loadAgentDefs(ctx.cwd, getAgentDir());
