@@ -30,7 +30,7 @@ import { Type } from "typebox";
 
 import { loadAgentDefs } from "../src/defs.ts";
 import { buildMentionMessage, findMentions } from "../src/mentions.ts";
-import { createIsolationWorktree, isolationNote, type Isolation } from "../src/isolate.ts";
+import { createIsolationWorktree, isolationNote, removeIfUnchanged, type Isolation } from "../src/isolate.ts";
 import { CHILD_FRAMING, buildTaskPrompt, describeDefs, formatRunResult } from "../src/prompts.ts";
 import { buildWidgetLines } from "../src/widget.ts";
 import {
@@ -174,7 +174,14 @@ export default function subagent(pi: ExtensionAPI) {
         .join("\n")
         .trim();
 
-      run.result = text || null;
+      // A run stopped at its turn cap is not a finished answer. Returning it
+      // unmarked reads as complete to whoever asked for it.
+      const cappedAtTurnLimit = run.turns >= def.maxTurns && last?.stopReason === "aborted";
+      run.result = cappedAtTurnLimit && text
+        ? `${text}
+
+[partial: stopped at the ${def.maxTurns}-turn cap for agent "${def.name}" — this answer may be unfinished]`
+        : text || null;
       run.status =
         last?.stopReason === "aborted" ? "aborted" : last?.stopReason === "error" ? "error" : "done";
       if (run.status === "error") run.error = text || "child session error";
@@ -341,7 +348,19 @@ export default function subagent(pi: ExtensionAPI) {
   });
 
   pi.on("session_start", async (_event, ctx) => {
-    defs = loadAgentDefs(ctx.cwd, getAgentDir());
+    const loaded = loadAgentDefs(
+      ctx.cwd,
+      getAgentDir(),
+      (ctx as unknown as { isProjectTrusted?: () => boolean }).isProjectTrusted?.() ?? false,
+    );
+    defs = loaded.defs;
+    if (loaded.refused.length > 0) {
+      notify(
+        ctx,
+        `subagent: ${loaded.refused.length} project agent definition(s) not loaded — this project is not trusted (${loaded.refused.join(", ")})`,
+        "warning",
+      );
+    }
     // Completed runs from earlier in this session's branch are replayable so
     // agent_result keeps working after /reload. Running ones did not survive.
     runs.clear();

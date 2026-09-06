@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAgentFile } from "../src/frontmatter.ts";
 import { buildMentionMessage, findMentions } from "../src/mentions.ts";
+import { createIsolationWorktree, removeIfUnchanged } from "../src/isolate.ts";
+import { execFileSync } from "node:child_process";
 import { BUILTIN_AGENTS } from "../src/builtin.ts";
 import { loadAgentDefs } from "../src/defs.ts";
 import { buildWidgetLines } from "../src/widget.ts";
@@ -51,13 +53,9 @@ test("parseAgentFile rejects missing frontmatter or description", () => {
   assert.equal(parseAgentFile("x", "---\ntools: read\n---\nbody", "builtin"), null);
 });
 
-test("parseAgentFile clamps invalid max_turns and all-invalid tools", () => {
-  const def = parseAgentFile(
-    "x",
-    "---\ndescription: d\ntools: nope, nada\nmax_turns: 9999\n---\nb",
-    "builtin",
-  );
-  assert.deepEqual(def!.tools, ["read", "grep", "find", "ls"]);
+test("parseAgentFile clamps invalid max_turns", () => {
+  const def = parseAgentFile("x", "---\ndescription: d\ntools: read\nmax_turns: 9999\n---\nb", "builtin");
+  assert.deepEqual(def!.tools, ["read"]);
   assert.equal(def!.maxTurns, DEFAULT_MAX_TURNS);
 });
 
@@ -92,13 +90,22 @@ test("loadAgentDefs precedence: project > global > builtin", () => {
     writeFileSync(join(cwd, ".pi", "agents", "custom.md"), "---\ndescription: custom\n---\nc");
     writeFileSync(join(cwd, ".pi", "agents", "broken.md"), "not an agent file");
 
-    const defs = loadAgentDefs(cwd, agentDir);
+    const { defs, refused } = loadAgentDefs(cwd, agentDir, true);
     assert.equal(defs.get("reviewer")!.description, "project reviewer override");
     assert.equal(defs.get("reviewer")!.source, "project");
     assert.equal(defs.get("custom")!.source, "project");
     assert.ok(defs.get("scout"));
     assert.ok(defs.get("worker"));
     assert.equal(defs.get("broken"), undefined);
+    assert.deepEqual(refused, []);
+
+    // v0.5: an untrusted project keeps its definitions out, builtins intact
+    const untrusted = loadAgentDefs(cwd, agentDir, false);
+    assert.equal(untrusted.defs.get("reviewer")!.description, "global reviewer override");
+    assert.equal(untrusted.defs.get("reviewer")!.source, "global");
+    assert.equal(untrusted.defs.get("custom"), undefined);
+    assert.ok(untrusted.defs.get("scout"), "builtins still load");
+    assert.deepEqual([...untrusted.refused].sort(), ["custom", "reviewer"]);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
@@ -271,4 +278,75 @@ test("v0.4 the mention message names each agent and forbids merging", () => {
   assert.ok(two.includes('agent="reviewer"') && two.includes('agent="scout"'));
   assert.ok(two.includes("(no description)"));
   assert.ok(two.includes("Do not merge separate agents into one call"));
+});
+
+test("v0.5 a tools list where nothing resolves rejects the file", () => {
+  // The author asked for a specific tool set; silently handing back the
+  // read-only default runs an agent nobody wrote.
+  assert.equal(parseAgentFile("x", "---\ndescription: d\ntools: nonsense, alsobad\n---\nbody", "project"), null);
+  // a missing tools: line is still the safe read-only default
+  assert.deepEqual(parseAgentFile("x", "---\ndescription: d\n---\nbody", "project")!.tools, [
+    "read",
+    "grep",
+    "find",
+    "ls",
+  ]);
+  // partially valid keeps what resolved
+  assert.deepEqual(parseAgentFile("x", "---\ndescription: d\ntools: read, nonsense\n---\nb", "project")!.tools, [
+    "read",
+  ]);
+  // an empty tools: line falls back rather than rejecting
+  assert.deepEqual(parseAgentFile("x", "---\ndescription: d\ntools:\n---\nb", "project")!.tools, [
+    "read",
+    "grep",
+    "find",
+    "ls",
+  ]);
+});
+
+test("v0.5 an unchanged isolation worktree is removed, a used one is kept", () => {
+  const base = mkdtempSync(join(tmpdir(), "pify-iso-"));
+  const repo = join(base, "repo");
+  mkdirSync(repo, { recursive: true });
+  const git = (cwd: string, args: string[]) =>
+    execFileSync("git", args, { cwd, encoding: "utf8", windowsHide: true });
+  try {
+    git(repo, ["init", "-q"]);
+    git(repo, ["config", "user.email", "t@example.com"]);
+    git(repo, ["config", "user.name", "t"]);
+    writeFileSync(join(repo, "a.txt"), "one\n");
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-qm", "init"]);
+
+    // a run that touched nothing
+    const idle = createIsolationWorktree(repo, "idle-run");
+    assert.ok(existsSync(idle.path));
+    assert.equal(removeIfUnchanged(repo, idle), true);
+    assert.ok(!existsSync(idle.path), "the worktree directory is gone");
+    assert.ok(!git(repo, ["branch", "--list", idle.branch]).trim(), "and so is its branch");
+
+    // a run that left uncommitted work
+    const dirty = createIsolationWorktree(repo, "dirty-run");
+    writeFileSync(join(dirty.path, "b.txt"), "work\n");
+    assert.equal(removeIfUnchanged(repo, dirty), false);
+    assert.ok(existsSync(dirty.path), "someone's work is never deleted");
+
+    // a run that committed
+    const committed = createIsolationWorktree(repo, "committed-run");
+    writeFileSync(join(committed.path, "c.txt"), "done\n");
+    git(committed.path, ["add", "-A"]);
+    git(committed.path, ["commit", "-qm", "child work"]);
+    assert.equal(removeIfUnchanged(repo, committed), false);
+    assert.ok(existsSync(committed.path));
+
+    // a path that is not a worktree at all is refused, not force-deleted
+    assert.equal(removeIfUnchanged(repo, { path: join(base, "nope"), branch: "agent/nope" }), false);
+  } finally {
+    try {
+      execFileSync("git", ["worktree", "prune"], { cwd: repo, windowsHide: true });
+    } catch {
+      // best effort
+    }
+    rmSync(base, { recursive: true, force: true });
+  }
 });

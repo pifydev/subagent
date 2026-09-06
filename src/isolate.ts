@@ -79,3 +79,36 @@ export function isolationNote(isolation: Isolation): string {
     `or inspect: cd "${isolation.path}" && git log --stat`,
   ].join("\n");
 }
+
+/**
+ * Remove a worktree the child left untouched. An isolated run that changed
+ * nothing is the common case — a review, a search, a question — and keeping
+ * its worktree means a directory and a branch per run accumulate under
+ * ~/.worktrees for as long as the machine runs. A worktree with any change,
+ * staged or not, committed or not, is kept: that is someone's work.
+ *
+ * Returns true when it was removed. Never throws: failing to clean up must
+ * not fail the run that already succeeded.
+ */
+export function removeIfUnchanged(cwd: string, isolation: Isolation): boolean {
+  try {
+    // Uncommitted work, tracked or not.
+    if (git(isolation.path, ["status", "--porcelain"]).trim()) return false;
+    // Commits made inside the worktree: the branch moved off the commit it
+    // was cut from. (A fresh agent/<slug> branch has no upstream, so asking
+    // git for "ahead of upstream" would throw here rather than answer.)
+    const head = git(isolation.path, ["rev-parse", "HEAD"]).trim();
+    const base = git(cwd, ["rev-parse", "HEAD"]).trim();
+    if (!head || head !== base) return false;
+  } catch {
+    // A worktree we cannot inspect is one we must not delete.
+    return false;
+  }
+  try {
+    git(cwd, ["worktree", "remove", "--force", isolation.path]);
+    git(cwd, ["branch", "-D", isolation.branch]);
+    return true;
+  } catch {
+    return false;
+  }
+}
