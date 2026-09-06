@@ -44,6 +44,9 @@ export function parseAgentFile(
       : DEFAULT_MAX_TURNS;
 
   const model = fields.get("model") || null;
+  const promptMode = fields.get("system_prompt_mode")?.toLowerCase();
+  const systemPromptMode = promptMode === "replace" ? "replace" : "append";
+  const inheritSkills = !isFalse(fields.get("inherit_skills"));
 
   return {
     name: name.toLowerCase(),
@@ -53,8 +56,16 @@ export function parseAgentFile(
     thinking,
     maxTurns,
     systemPrompt: match[2]!.trim(),
+    systemPromptMode,
+    inheritSkills,
     source,
   };
+}
+
+/** Frontmatter booleans, written the handful of ways people write them. */
+function isFalse(raw: string | undefined): boolean {
+  if (raw === undefined) return false;
+  return ["false", "no", "off", "0"].includes(raw.trim().toLowerCase());
 }
 
 /** Read-only default keeps a def missing `tools:` from mutating anything. */

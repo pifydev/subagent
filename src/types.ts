@@ -38,6 +38,14 @@ export interface AgentDef {
   maxTurns: number;
   /** Markdown body appended to the child's system prompt. */
   systemPrompt: string;
+  /**
+   * "append" (default) puts the body after the session's own system prompt;
+   * "replace" drops the parent's prompt so a specialist is not also told to
+   * be this project's coding assistant.
+   */
+  systemPromptMode: "append" | "replace";
+  /** Whether the child loads the project's skills (default true). */
+  inheritSkills: boolean;
   source: "builtin" | "global" | "project";
 }
 

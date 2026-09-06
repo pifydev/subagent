@@ -129,9 +129,16 @@ export default function subagent(pi: ExtensionAPI) {
           noExtensions: true,
           noPromptTemplates: true,
           noThemes: true,
-          systemPrompt: promptOptions.customPrompt,
+          // system_prompt_mode: replace drops the parent's prompt so a
+          // specialist is not also told to be this project's coding
+          // assistant; inherit_skills: false keeps a focused child out of
+          // the project's whole skill surface.
+          noSkills: !def.inheritSkills,
+          ...(def.systemPromptMode === "replace" ? {} : { systemPrompt: promptOptions.customPrompt }),
           appendSystemPrompt: [
-            ...(promptOptions.appendSystemPrompt ? [promptOptions.appendSystemPrompt] : []),
+            ...(def.systemPromptMode === "replace" || !promptOptions.appendSystemPrompt
+              ? []
+              : [promptOptions.appendSystemPrompt]),
             def.systemPrompt,
             CHILD_FRAMING,
           ],

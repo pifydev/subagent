@@ -205,3 +205,34 @@ test("v0.2 isolation refuses outside a git repo", async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("v0.3 system_prompt_mode and inherit_skills parse with safe defaults", () => {
+  const base = (extra: string) =>
+    parseAgentFile("x", `---\ndescription: d\n${extra}\n---\nbody`, "project")!;
+
+  // defaults: append the body to the session prompt, keep the skills
+  const plain = base("tools: read");
+  assert.equal(plain.systemPromptMode, "append");
+  assert.equal(plain.inheritSkills, true);
+
+  assert.equal(base("system_prompt_mode: replace").systemPromptMode, "replace");
+  assert.equal(base("system_prompt_mode: REPLACE").systemPromptMode, "replace");
+  assert.equal(base("system_prompt_mode: append").systemPromptMode, "append");
+  // an unknown value must not silently drop the parent prompt
+  assert.equal(base("system_prompt_mode: nonsense").systemPromptMode, "append");
+
+  for (const falsey of ["false", "no", "off", "0", "False", " NO "]) {
+    assert.equal(base(`inherit_skills: ${falsey}`).inheritSkills, false, falsey);
+  }
+  for (const truthy of ["true", "yes", "on", "1", ""]) {
+    assert.equal(base(`inherit_skills: ${truthy}`).inheritSkills, true, truthy);
+  }
+});
+
+test("v0.3 builtin agents keep the defaults", () => {
+  for (const [name, content] of Object.entries(BUILTIN_AGENTS)) {
+    const def = parseAgentFile(name, content, "builtin")!;
+    assert.equal(def.systemPromptMode, "append", name);
+    assert.equal(def.inheritSkills, true, name);
+  }
+});
