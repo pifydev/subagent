@@ -4,26 +4,44 @@ Spawn scoped subagents from within a [pi](https://github.com/earendil-works/pi) 
 
 Part of the [Pify suite](https://github.com/pifydev). Install with [`pify install subagent`](https://github.com/pifydev/cli) or `pi install npm:@pify/subagent`.
 
-## What it does
+## Why
 
-- **`agent_run`** — delegate a task to a child pi session (in-process, isolated in-memory transcript). Foreground blocks and returns the child's report; `background: true` returns an id immediately (up to 4 concurrent) with a live widget showing spinners, token counts, and elapsed time.
-- **`agent_result`** — collect a background run's report; completed results survive `/reload`.
-- **Three builtin agent types**: `reviewer` (read-only, thinking high — findings with evidence), `scout` (read-only exploration — paths + excerpts), `worker` (full tools — scoped implementation, verifies before finishing).
-- **A repository's agents need trust** (v0.5): `.pi/agents/*.md` carries a tool allowlist and a system prompt, and a project definition *overrides* a builtin of the same name — so a repo you just cloned could become your `reviewer` the first time you ran it. Project definitions now load only once pi's project trust is granted; until then they are listed as refused rather than silently ignored. Global and builtin agents are unaffected. (The trust posture is from [`pi-code`](https://github.com/ilovepixelart/pi-code), which treats everything a repository ships as untrusted until approved.)
-- **A child can ask instead of guessing** (v0.6): a scoped child that hits a decision it should not be making — an unstated product/API/scope choice, or missing access — calls `ask_supervisor`, and the question reaches **you** through the usual dialog. The parent agent is blocked inside the tool call that spawned the child, so it could not answer anyway; the person owns the decision regardless. A declined question is not permission to guess: the child is told to finish what the brief authorises and report what it could not decide. Three questions per run, and no progress channel — a child's progress belongs in its report, not in an interruption. Measured across qwen3-235b, gpt-5.5 and claude-sonnet-4.5: six runs out of six asked rather than inventing an answer. (From [`pi-intercom`](https://github.com/nicobailon/pi-intercom)'s `contact_supervisor`.)
-- **An exit status is not an answer** (v0.6): a child that stopped cleanly and produced no text used to be recorded as `done` with an empty result — which the report then rendered as *"still running"*, sending the parent to poll a run that had already ended. A finished run with nothing in it now says exactly that, and says what to do instead. (The principle is from [`pi-background-tasks`](https://github.com/ismailsaleekh/pi-background-tasks): a task whose result file is absent has no accepted answer even when the child exited 0.)
-- **Honest endings** (v0.5): a run stopped at its turn cap comes back marked `[partial: stopped at the N-turn cap]` instead of reading like a finished answer, and a `tools:` line where nothing resolves rejects the definition instead of quietly falling back to read-only — the author asked for a tool set and would otherwise get an agent nobody wrote.
-- **Isolated runs clean up after themselves** (v0.5): `isolation: "worktree"` removes the worktree and its branch when the child changed nothing — the common case for a review or a search. Anything uncommitted, or any commit the child made, is kept and reported.
-- **`@agent` at the prompt** (v0.4): "`@reviewer` check the diff while `@scout` maps the callers" delegates to both, one `agent_run` each — no describing the roster to the model first. The instruction rides with the turn as a hidden message rather than a system-prompt edit, so the request prefix stays byte-identical and the **prompt cache survives** the turn that is about to fan out. `@` inside an email or a path is not a mention. (Idea from [`pi-cc-extensions`](https://github.com/minuque/pi-cc-extensions); the cache-stable delivery is this suite's rule.)
-- **Custom agent types**, Claude Code-compatible: drop `.pi/agents/<name>.md` (project) or `<agentDir>/agents/<name>.md` (global) with frontmatter — `description`, `tools`, `model` (`provider/id`), `thinking`, `max_turns`, and (v0.3) `system_prompt_mode` / `inherit_skills` — and a system-prompt body. Project overrides global overrides builtin; a def without `tools:` defaults to read-only.
-- **Guardrails**: tool allowlists are enforced at session creation; children are aborted at their turn cap; children cannot spawn children.
-- `/agents` lists types and this session's runs.
+Some work does not belong in the main conversation. Reading forty files to find three call sites, auditing a diff, exploring an unfamiliar package — the *answer* is worth keeping and the search that produced it is not. A child agent does the search in its own transcript and hands back only the report.
 
-## Where this sits in the suite
+The other half is scope. A child with four read-only tools and a fifteen-turn cap cannot wander into refactoring your build config, however plausible that seemed to it at the time.
 
-`@pify/subagent` is deliberately the primitive: one child, one task, one report. Multi-agent coordination belongs to `@pify/swarm`; deterministic scripted orchestration to `@pify/workflow`.
+## Tools
 
-## Custom agent example
+### `agent_run`
+
+| Parameter | Type | Notes |
+|---|---|---|
+| `agent` | string | Agent type: a builtin, or one of yours |
+| `task` | string | A self-contained brief — the child cannot see your conversation |
+| `background` | boolean, optional | Return an id immediately instead of blocking; up to 4 concurrent |
+| `isolation` | `"worktree"`, optional | Run the child in its own git worktree |
+
+Foreground blocks and returns the child's report. Background returns an id and drives a live widget with spinners, token counts and elapsed time.
+
+### `agent_result`
+
+| Parameter | Type | Notes |
+|---|---|---|
+| `id` | string | The run to collect |
+
+Completed results survive `/reload`.
+
+## Builtin agent types
+
+| Type | Tools | For |
+|---|---|---|
+| `reviewer` | read-only, thinking high | Findings with evidence, file:line |
+| `scout` | read-only | Exploration — paths and excerpts, breadth over depth |
+| `worker` | full | Scoped implementation, verified before it reports |
+
+## Custom agent types
+
+Drop `.pi/agents/<name>.md` (project) or `<agentDir>/agents/<name>.md` (global):
 
 ```markdown
 ---
@@ -40,7 +58,47 @@ You are a security auditor. Scan for hardcoded secrets, injection flaws,
 and overly broad permissions. Report file:line with remediation notes.
 ```
 
-`system_prompt_mode: replace` (default `append`) drops the session's own system prompt, so a specialist is not also told to be this project's coding assistant. `inherit_skills: false` (default `true`) keeps a narrow child out of the project's whole skill surface. Both are unset in the builtins, which behave exactly as before.
+Project overrides global overrides builtin. A definition without a `tools:` line defaults to read-only.
+
+`system_prompt_mode: replace` (default `append`) drops the session's own system prompt, so a specialist is not also told to be this project's coding assistant. `inherit_skills: false` (default `true`) keeps a narrow child out of the project's whole skill surface. Both are unset in the builtins, which behave as they always have.
+
+## A repository's agents need trust
+
+`.pi/agents/*.md` carries a tool allowlist and a system prompt, and a project definition *overrides* a builtin of the same name — so a repository you had just cloned could become your `reviewer` the first time you ran pi in it.
+
+Project definitions therefore load only once pi's project trust has been granted. Until then they are listed as **refused** rather than silently ignored, so a missing agent has a visible reason. Global and builtin definitions are unaffected.
+
+## A child can ask instead of guessing
+
+A scoped child that hits a decision it should not be making — an unstated product, API or scope choice, or missing access — calls `ask_supervisor`, and the question reaches **you** through the usual dialog.
+
+It reaches you rather than the parent agent for a structural reason: the parent is blocked inside the tool call that spawned the child, so it could not answer anyway. And the decision is yours regardless.
+
+A declined question is not permission to guess. The child is told to finish what the brief authorises and report what it could not decide. Three questions per run, and there is deliberately no progress channel — a child's progress belongs in its report, not in an interruption.
+
+Measured across qwen3-235b, gpt-5.5 and claude-sonnet-4.5: six runs out of six asked rather than inventing an answer.
+
+## `@agent` at the prompt
+
+> `@reviewer` check the diff while `@scout` maps the callers
+
+delegates to both, one `agent_run` each, with no need to describe the roster to the model first. The instruction rides with the turn as a hidden message rather than a system-prompt edit, so the request prefix stays byte-identical and the **prompt cache survives** the turn that is about to fan out. An `@` inside an email address or a path is not a mention.
+
+## Behaviour
+
+- **Stopping stops the child.** Pressing Esc, or switching away from the session, aborts the child session rather than leaving it talking to the provider on your money. A run cancelled that way keeps that verdict and says why.
+- **Honest endings.** A run stopped at its turn cap comes back marked `[partial: stopped at the N-turn cap]` instead of reading like a finished answer. A child that stopped cleanly and produced no text says exactly that — it used to be recorded as `done` with an empty result, which the report then rendered as *"still running"*, sending the parent to poll a run that had already ended.
+- **A broken definition is refused.** A `tools:` line where nothing resolves rejects the definition rather than quietly falling back to read-only: the author asked for a tool set and would otherwise get an agent nobody wrote.
+- **Isolated runs clean up after themselves.** With `isolation: "worktree"`, a worktree whose child changed nothing is removed along with its branch — the common case for a review or a search. Anything uncommitted, and any commit the child made, is kept and reported.
+- **Guardrails.** Tool allowlists are enforced at session creation, children are aborted at their turn cap, and children cannot spawn children.
+
+## Command
+
+`/agents` — the available agent types and this session's runs.
+
+## Where this sits in the suite
+
+`@pify/subagent` is deliberately the primitive: one child, one task, one report. Many independent items at once belong to [`@pify/swarm`](https://github.com/pifydev/swarm); deterministic scripted orchestration to [`@pify/workflow`](https://github.com/pifydev/workflow). All three read the same agent catalog.
 
 ## License
 
