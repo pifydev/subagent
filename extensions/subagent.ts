@@ -29,6 +29,9 @@ import { Text } from "@earendil-works/pi-tui";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { loadAgentDefs } from "../src/defs.ts";
 import {
   ASK_BUDGET,
@@ -43,6 +46,14 @@ import {
 } from "../src/ask.ts";
 import { buildMentionMessage, findMentions } from "../src/mentions.ts";
 import { LiveChildren, cancelNote, type CancelReason } from "../src/cancel.ts";
+import {
+  consentQuestion,
+  decideConsent,
+  envConsent,
+  parseConsent,
+  readConsent,
+  writeConsent,
+} from "../src/consent.ts";
 import { createIsolationWorktree, isolationNote, removeIfUnchanged, type Isolation } from "../src/isolate.ts";
 import { buildTaskPrompt, childFraming, describeDefs, formatRunResult } from "../src/prompts.ts";
 import { buildWidgetLines } from "../src/widget.ts";
@@ -114,6 +125,53 @@ export default function subagent(pi: ExtensionAPI) {
     const n = (counters.get(agent) ?? 0) + 1;
     counters.set(agent, n);
     return `${agent}-${n}`;
+  }
+
+  /** Where the suite records which projects you approved, and for what. */
+  function consentFile(): string {
+    return join(getAgentDir(), "pify-project-consent.json");
+  }
+
+  /**
+   * May this repository's own agent definitions be loaded? A project
+   * definition overrides a builtin of the same name and carries both a tool
+   * allowlist and a system prompt, so it decides what your `reviewer` is.
+   *
+   * pi's own trust decision is necessary but not sufficient: pi only asks
+   * about trust when the repository ships one of the resources pi itself
+   * loads, and `.pi/agents/` is not one of them — measured, a repo whose only
+   * pi file was `.pi/agents/reviewer.md` reported `isProjectTrusted=true`.
+   */
+  async function projectAgentsAllowed(ctx: UiContext): Promise<boolean> {
+    const dir = join(ctx.cwd, ".pi", "agents");
+    if (!existsSync(dir)) return false;
+    const file = consentFile();
+    let raw: string | null = null;
+    try {
+      raw = readFileSync(file, "utf8");
+    } catch {
+      raw = null;
+    }
+    const store = parseConsent(raw);
+    const verdict = decideConsent({
+      projectTrusted: (ctx as unknown as { isProjectTrusted?: () => boolean }).isProjectTrusted?.() ?? false,
+      remembered: readConsent(store, ctx.cwd, "agents"),
+      hasUI: ctx.hasUI,
+      envOverride: envConsent(process.env),
+    });
+    if (verdict !== "ask") return verdict === "allow";
+
+    const approved = await ctx.ui.confirm(
+      "Load this project's agent definitions?",
+      consentQuestion("its own agent definitions, which override the builtins of the same name", dir),
+    );
+    try {
+      writeFileSync(file, `${JSON.stringify(writeConsent(store, ctx.cwd, "agents", approved), null, 2)}
+`);
+    } catch {
+      // An unwritable consent file costs us the memory of the answer, not the answer.
+    }
+    return approved;
   }
 
   async function runChild(ctx: UiContext, def: AgentDef, run: RunState, workDir?: string): Promise<void> {
@@ -457,16 +515,12 @@ export default function subagent(pi: ExtensionAPI) {
   });
 
   pi.on("session_start", async (_event, ctx) => {
-    const loaded = loadAgentDefs(
-      ctx.cwd,
-      getAgentDir(),
-      (ctx as unknown as { isProjectTrusted?: () => boolean }).isProjectTrusted?.() ?? false,
-    );
+    const loaded = loadAgentDefs(ctx.cwd, getAgentDir(), await projectAgentsAllowed(ctx));
     defs = loaded.defs;
     if (loaded.refused.length > 0) {
       notify(
         ctx,
-        `subagent: ${loaded.refused.length} project agent definition(s) not loaded — this project is not trusted (${loaded.refused.join(", ")})`,
+        `subagent: ${loaded.refused.length} project agent definition(s) not loaded — you have not approved this project's agents (${loaded.refused.join(", ")})`,
         "warning",
       );
     }

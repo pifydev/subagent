@@ -62,11 +62,17 @@ Project overrides global overrides builtin. A definition without a `tools:` line
 
 `system_prompt_mode: replace` (default `append`) drops the session's own system prompt, so a specialist is not also told to be this project's coding assistant. `inherit_skills: false` (default `true`) keeps a narrow child out of the project's whole skill surface. Both are unset in the builtins, which behave as they always have.
 
-## A repository's agents need trust
+## A repository's agents need your consent
 
-`.pi/agents/*.md` carries a tool allowlist and a system prompt, and a project definition *overrides* a builtin of the same name — so a repository you had just cloned could become your `reviewer` the first time you ran pi in it.
+`.pi/agents/*.md` carries a tool allowlist and a system prompt, and a project definition *overrides* a builtin of the same name — so a repository you had just cloned could decide what your `reviewer` is, the first time you ran pi in it.
 
-Project definitions therefore load only once pi's project trust has been granted. Until then they are listed as **refused** rather than silently ignored, so a missing agent has a visible reason. Global and builtin definitions are unaffected.
+pi's own project trust turned out to be necessary but not sufficient. pi asks about trust only when the repository ships one of the resources **pi itself** loads — `.pi/settings.json`, `.pi/extensions`, `.pi/skills`, `.pi/prompts`, `.pi/themes`, `SYSTEM.md`, `APPEND_SYSTEM.md`. A repo carrying only `.pi/agents/` triggers no prompt at all, and `isProjectTrusted()` then returns true by default. That is measured, not assumed: a repository whose only pi file was `.pi/agents/reviewer.md` reported `isProjectTrusted=true`, while the same repository with a `.pi/skills` directory reported false.
+
+So a file this extension invented needs a question this extension asks. The first time a project's agent definitions would be loaded, you are asked once and the answer is remembered per project. pi refusing the project is still final — this can only ever be a second gate, never a way around the first — and a headless run with no answer on record refuses, like every other fail-closed path here.
+
+Until they are approved, project definitions are listed as **refused** rather than silently ignored, so a missing agent has a visible reason. Global and builtin definitions are unaffected.
+
+For CI, set `PIFY_TRUST_PROJECT=1`. It is an environment variable rather than a file precisely because the repository being read cannot set it for itself.
 
 ## A child can ask instead of guessing
 
