@@ -15,7 +15,12 @@ export function buildTaskPrompt(task: string): string {
 /** Tool-result text returned to the parent model for a finished run. */
 export function formatRunResult(run: RunState): string {
   const header = `[${run.agent} · ${run.id} · ${run.status} · ${run.turns} turns]`;
-  if (run.status === "done" && run.result) return `${header}\n${run.result}`;
+  if (run.status === "done") {
+    // Only a run that is genuinely still running may be reported as such.
+    return run.result
+      ? `${header}\n${run.result}`
+      : `${header}\nThe child finished without producing an answer. Do not wait for it — re-run with a narrower task, or do the work here.`;
+  }
   if (run.status === "error") return `${header}\nError: ${run.error ?? "unknown failure"}`;
   if (run.status === "aborted") {
     return `${header}\nAborted (turn limit or user stop). Partial output:\n${run.result ?? "(none)"}`;

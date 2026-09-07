@@ -350,3 +350,18 @@ test("v0.5 an unchanged isolation worktree is removed, a used one is kept", () =
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+test("v0.6 a finished run with no answer is never reported as still running", () => {
+  // The bug this replaces: status "done" with a null result fell through to
+  // the running branch, so the parent polled a run that had already ended.
+  const empty = formatRunResult(run({ status: "done", result: null }));
+  assert.ok(!empty.includes("Still running"), empty);
+  assert.ok(empty.includes("without producing an answer"));
+  assert.ok(empty.includes("re-run with a narrower task"));
+
+  // the ordinary paths are unchanged
+  assert.ok(formatRunResult(run({ status: "done", result: "the answer" })).includes("the answer"));
+  assert.ok(formatRunResult(run({ status: "running" })).includes("Still running"));
+  assert.ok(formatRunResult(run({ status: "error", error: "boom" })).includes("Error: boom"));
+  assert.ok(formatRunResult(run({ status: "aborted", result: null })).includes("(none)"));
+});

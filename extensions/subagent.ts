@@ -184,7 +184,15 @@ export default function subagent(pi: ExtensionAPI) {
         : text || null;
       run.status =
         last?.stopReason === "aborted" ? "aborted" : last?.stopReason === "error" ? "error" : "done";
-      if (run.status === "error") run.error = text || "child session error";
+      // A child that stopped cleanly and said nothing has not answered. It
+      // used to be recorded as done with a null result, which formatRunResult
+      // then reported as "still running" — the parent polling forever for a
+      // run that already ended. An exit status is not an answer.
+      if (run.status === "done" && !run.result) {
+        run.status = "error";
+        run.error = "the child finished without producing an answer";
+      }
+      if (run.status === "error" && !run.error) run.error = text || "child session error";
     } catch (err) {
       run.status = "error";
       run.error = err instanceof Error ? err.message : String(err);
