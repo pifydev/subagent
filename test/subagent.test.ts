@@ -5,12 +5,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAgentFile } from "../src/frontmatter.ts";
 import { buildMentionMessage, findMentions } from "../src/mentions.ts";
+import {
+  ASK_BUDGET,
+  ASK_EXHAUSTED,
+  ASK_REASONS,
+  ASK_TOOL_DESCRIPTION,
+  ASK_TOOL_NAME,
+  askBody,
+  askTitle,
+  formatAnswer,
+} from "../src/ask.ts";
 import { createIsolationWorktree, removeIfUnchanged } from "../src/isolate.ts";
 import { execFileSync } from "node:child_process";
 import { BUILTIN_AGENTS } from "../src/builtin.ts";
 import { loadAgentDefs } from "../src/defs.ts";
 import { buildWidgetLines } from "../src/widget.ts";
-import { describeDefs, formatRunResult } from "../src/prompts.ts";
+import { childFraming, describeDefs, formatRunResult } from "../src/prompts.ts";
 import { DEFAULT_MAX_TURNS, type RunState, type ThemeLike } from "../src/types.ts";
 
 const theme: ThemeLike = { fg: (_c, t) => t, bold: (t) => t };
@@ -364,4 +374,53 @@ test("v0.6 a finished run with no answer is never reported as still running", ()
   assert.ok(formatRunResult(run({ status: "running" })).includes("Still running"));
   assert.ok(formatRunResult(run({ status: "error", error: "boom" })).includes("Error: boom"));
   assert.ok(formatRunResult(run({ status: "aborted", result: null })).includes("(none)"));
+});
+
+test("v0.6 ask_supervisor asks the smallest question, and handles a refusal", () => {
+  assert.equal(askTitle("reviewer", "need_decision"), "Subagent reviewer needs a decision");
+  assert.equal(askTitle("scout", "clarify_scope"), "Subagent scout needs the scope clarified");
+  assert.equal(askTitle("worker", "missing_access"), "Subagent worker is missing access");
+
+  assert.equal(askBody("Which database?", "  "), "Which database?");
+  assert.equal(askBody(" Which database? ", "Postgres is already a dependency."),
+    "Which database?\n\nPostgres is already a dependency.");
+
+  // A declined question must not read as permission to guess.
+  const declined = formatAnswer(null);
+  assert.ok(declined.includes("did not answer"));
+  assert.ok(declined.includes("Do not invent the decision"));
+  assert.ok(declined.includes("state in your report"));
+  assert.equal(formatAnswer("   "), declined, "an empty answer is a refusal");
+  assert.ok(formatAnswer("use Postgres").includes("Supervisor's answer: use Postgres"));
+
+  // The tool exists to prevent invention, and says so rather than inviting chat.
+  assert.ok(ASK_TOOL_DESCRIPTION.includes("Do not use it to report progress"));
+  assert.ok(ASK_TOOL_DESCRIPTION.includes("costs the user an interruption"));
+  assert.ok(!ASK_REASONS.includes("progress_update" as never), "no progress channel to a human");
+  assert.ok(ASK_EXHAUSTED.includes(String(ASK_BUDGET)));
+});
+
+test("v0.6 the ask tool must be on the allowlist, or it is silently dropped", () => {
+  // pi's `tools` option is an allowlist and it filters customTools too: a
+  // custom tool missing from it is registered and then removed, and the child
+  // is told no such tool exists. This asserts the shape the extension builds.
+  const defTools = ["read", "grep", "find", "ls"];
+  const withAsk = [...defTools, ASK_TOOL_NAME];
+  assert.ok(withAsk.includes("ask_supervisor"), "the ask tool travels on the allowlist");
+  assert.equal(withAsk.length, defTools.length + 1, "and nothing else is widened");
+  // headless children get neither the tool nor the allowlist entry
+  const headless = defTools;
+  assert.ok(!headless.includes(ASK_TOOL_NAME));
+});
+
+test("v0.6 the framing admits the exception only when the tool exists", () => {
+  const withoutAsk = childFraming(false);
+  assert.ok(withoutAsk.includes("Do not end your report with questions"));
+  assert.ok(!withoutAsk.includes("ask_supervisor"), "no dangling reference to a tool it does not have");
+
+  const withAsk = childFraming(true);
+  assert.ok(withAsk.includes("ask_supervisor"));
+  assert.ok(withAsk.includes("instead of guessing"));
+  // the base rule survives: a report is still not a place for questions
+  assert.ok(withAsk.includes("Do not end your report with questions"));
 });

@@ -26,12 +26,24 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
 import { loadAgentDefs } from "../src/defs.ts";
+import {
+  ASK_BUDGET,
+  ASK_EXHAUSTED,
+  ASK_REASONS,
+  ASK_TOOL_DESCRIPTION,
+  ASK_TOOL_NAME,
+  askBody,
+  askTitle,
+  formatAnswer,
+  type AskReason,
+} from "../src/ask.ts";
 import { buildMentionMessage, findMentions } from "../src/mentions.ts";
 import { createIsolationWorktree, isolationNote, removeIfUnchanged, type Isolation } from "../src/isolate.ts";
-import { CHILD_FRAMING, buildTaskPrompt, describeDefs, formatRunResult } from "../src/prompts.ts";
+import { buildTaskPrompt, childFraming, describeDefs, formatRunResult } from "../src/prompts.ts";
 import { buildWidgetLines } from "../src/widget.ts";
 import {
   MAX_CONCURRENT_BACKGROUND,
@@ -120,11 +132,50 @@ export default function subagent(pi: ExtensionAPI) {
         getSystemPromptOptions?: () => { customPrompt?: string; appendSystemPrompt?: string };
       };
       const promptOptions = promptHost.getSystemPromptOptions?.() ?? {};
+      // The child gets one way to reach a human: the decision it must not
+      // invent. Only when there is a UI to ask through.
+      let questionsLeft = ASK_BUDGET;
+      const customTools = ctx.hasUI
+        ? [
+            {
+              name: ASK_TOOL_NAME,
+              label: "Ask supervisor",
+              description: ASK_TOOL_DESCRIPTION,
+              parameters: Type.Object({
+                reason: StringEnum(ASK_REASONS),
+                question: Type.String({ description: "One specific question" }),
+                context: Type.Optional(Type.String({ description: "What you already established" })),
+              }),
+              async execute(
+                _childId: string,
+                params: { reason: AskReason; question: string; context?: string },
+              ) {
+                if (questionsLeft <= 0) {
+                  return { content: [{ type: "text", text: ASK_EXHAUSTED }], details: {} };
+                }
+                questionsLeft--;
+                const answer = await ctx.ui.input(
+                  askTitle(def.name, params.reason),
+                  askBody(params.question, params.context).slice(0, 500),
+                );
+                return {
+                  content: [{ type: "text", text: formatAnswer(answer ?? null) }],
+                  details: { reason: params.reason, answered: Boolean(answer?.trim()) },
+                };
+              },
+            },
+          ]
+        : [];
+
       const created = await createAgentSession({
         sessionManager: SessionManager.inMemory(workDir ?? ctx.cwd),
         model,
         thinkingLevel: (def.thinking ?? pi.getThinkingLevel()) as never,
-        tools: def.tools,
+        // `tools` is an allowlist and it filters customTools too, so a custom
+        // tool that is not named here is registered and then dropped — the
+        // child is told it has no such tool. Found the hard way.
+        tools: customTools.length > 0 ? [...def.tools, ASK_TOOL_NAME] : def.tools,
+        customTools: customTools as never,
         resourceLoader: new DefaultResourceLoader({
           cwd: workDir ?? ctx.cwd,
           agentDir: getAgentDir(),
@@ -142,7 +193,7 @@ export default function subagent(pi: ExtensionAPI) {
               ? []
               : [promptOptions.appendSystemPrompt]),
             def.systemPrompt,
-            CHILD_FRAMING,
+            childFraming(customTools.length > 0),
           ],
         }),
       });

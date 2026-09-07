@@ -1,11 +1,35 @@
 import type { AgentDef, RunState } from "./types.ts";
 
 /** Framing appended to every child's system prompt after the def body. */
-export const CHILD_FRAMING = [
+const CHILD_BASE = [
   "You are a subagent running a single delegated task inside another agent's session.",
   "Your final assistant message IS the deliverable returned to the caller —",
-  "make it a complete, self-contained report; do not ask follow-up questions.",
+  "make it a complete, self-contained report. Do not end your report with questions:",
+  "the caller cannot reply to it.",
 ].join(" ");
+
+/**
+ * Framing for the child. `canAsk` adds the one exception to "do not ask":
+ * a decision that is genuinely the supervisor's. Without this line the
+ * ask_supervisor tool is unreachable in practice: the base framing forbids
+ * asking, and a model follows the prompt over a tool description.
+ *
+ * Measured across qwen3-235b, gpt-5.5 and claude-sonnet-4.5 on two framings
+ * of an underspecified task: with the tool registered and this line present,
+ * six runs out of six asked instead of inventing the answer.
+ */
+export function childFraming(canAsk: boolean): string {
+  if (!canAsk) return CHILD_BASE;
+  return [
+    CHILD_BASE,
+    "The one exception: if continuing would mean inventing a decision that belongs to the",
+    "supervisor — an unstated product/API/scope choice, or missing access — call ask_supervisor",
+    "and wait for the answer instead of guessing. Ask the smallest question that unblocks you.",
+  ].join(" ");
+}
+
+/** @deprecated use childFraming(); kept so an older import still resolves. */
+export const CHILD_FRAMING = CHILD_BASE;
 
 /** The task prompt sent to the child session. */
 export function buildTaskPrompt(task: string): string {
