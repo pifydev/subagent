@@ -38,3 +38,12 @@ The child sees NONE of this conversation. The brief must be self-contained:
 Custom agent types: `.pi/agents/<name>.md` (description/tools/model/thinking/
 max_turns frontmatter + system-prompt body) — project overrides global
 overrides builtin.
+
+## Reading a child's report
+
+- A report marked `[partial: stopped at the N-turn cap]` is an unfinished
+  answer. Say so, or re-run with a narrower task — never present it as the
+  child's conclusion.
+- An `error` or `aborted` run produced no result. A non-zero exit can never
+  be described as success, and neither can a child that died: state what did
+  not happen instead of filling the gap yourself.
