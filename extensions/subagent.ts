@@ -42,6 +42,7 @@ import {
   type AskReason,
 } from "../src/ask.ts";
 import { buildMentionMessage, findMentions } from "../src/mentions.ts";
+import { LiveChildren, cancelNote, type CancelReason } from "../src/cancel.ts";
 import { createIsolationWorktree, isolationNote, removeIfUnchanged, type Isolation } from "../src/isolate.ts";
 import { buildTaskPrompt, childFraming, describeDefs, formatRunResult } from "../src/prompts.ts";
 import { buildWidgetLines } from "../src/widget.ts";
@@ -50,6 +51,7 @@ import {
   isRecord,
   type AgentDef,
   type RunState,
+  type RunStatus,
 } from "../src/types.ts";
 
 const RESULT_ENTRY = "subagent-result";
@@ -76,6 +78,8 @@ export default function subagent(pi: ExtensionAPI) {
     if (next) next();
   }
   const runs = new Map<string, RunState>();
+  /** Live child sessions per run, so a stop actually reaches the children. */
+  const live = new LiveChildren();
   const counters = new Map<string, number>();
   let lastUiCtx: UiContext | null = null;
 
@@ -113,8 +117,12 @@ export default function subagent(pi: ExtensionAPI) {
   }
 
   async function runChild(ctx: UiContext, def: AgentDef, run: RunState, workDir?: string): Promise<void> {
+    // Nothing to start if the user already stopped this run while it queued
+    // behind the concurrency cap.
+    if (run.status === "aborted") return;
     let session: AgentSession | null = null;
     let unsubscribe: (() => void) | null = null;
+    let releaseLive: (() => void) | null = null;
     try {
       let model = ctx.model ?? null;
       if (def.model) {
@@ -198,6 +206,7 @@ export default function subagent(pi: ExtensionAPI) {
         }),
       });
       session = created.session;
+      releaseLive = live.register(run.id, session);
 
       unsubscribe = session.subscribe((event) => {
         if (event.type === "message_end" && (event as { message?: { role?: string } }).message?.role === "assistant") {
@@ -233,8 +242,16 @@ export default function subagent(pi: ExtensionAPI) {
 
 [partial: stopped at the ${def.maxTurns}-turn cap for agent "${def.name}" — this answer may be unfinished]`
         : text || null;
-      run.status =
-        last?.stopReason === "aborted" ? "aborted" : last?.stopReason === "error" ? "error" : "done";
+      // A run the user (or session teardown) already cancelled keeps that
+      // verdict and its explanation — the child stopping is the consequence,
+      // not a separate outcome.
+      // The cast is load-bearing: TypeScript narrowed status at the top of
+      // this function, but cancelRun can flip it while we were awaiting.
+      const cancelled = (run.status as RunStatus) === "aborted" && run.error !== null;
+      if (!cancelled) {
+        run.status =
+          last?.stopReason === "aborted" ? "aborted" : last?.stopReason === "error" ? "error" : "done";
+      }
       // A child that stopped cleanly and said nothing has not answered. It
       // used to be recorded as done with a null result, which formatRunResult
       // then reported as "still running" — the parent polling forever for a
@@ -249,6 +266,7 @@ export default function subagent(pi: ExtensionAPI) {
       run.error = err instanceof Error ? err.message : String(err);
     } finally {
       run.finishedAt = Date.now();
+      if (releaseLive) releaseLive();
       if (unsubscribe) {
         try {
           unsubscribe();
@@ -266,6 +284,22 @@ export default function subagent(pi: ExtensionAPI) {
       pi.appendEntry(RESULT_ENTRY, run);
       renderWidget();
     }
+  }
+
+  /**
+   * Stop a run and the child it started. Both meanings of "stop" — the user's
+   * abort and session teardown — come through here; marking the record
+   * without aborting the child left it talking to the provider on the user's
+   * money, writing into a conversation nobody would read.
+   */
+  function cancelRun(run: RunState, reason: CancelReason): void {
+    const stopped = live.abortRun(run.id);
+    if (run.status === "running") {
+      run.status = "aborted";
+      run.finishedAt = Date.now();
+      run.error = cancelNote(reason, stopped);
+    }
+    renderWidget();
   }
 
   // ── Tools ────────────────────────────────────────────────────────────
@@ -290,7 +324,7 @@ export default function subagent(pi: ExtensionAPI) {
     async execute(
       _id,
       params: { agent: string; task: string; background?: boolean; isolation?: string },
-      _signal,
+      signal,
       _onUpdate,
       ctx,
     ) {
@@ -328,6 +362,18 @@ export default function subagent(pi: ExtensionAPI) {
       runs.set(run.id, run);
       renderWidget(uiCtx);
 
+      // Esc must reach the child. A background run outlives this tool call by
+      // design, so its signal is not its cancel button.
+      let stopListening: (() => void) | null = null;
+      if (signal && !background) {
+        const onAbort = () => cancelRun(run, "user-abort");
+        if (signal.aborted) onAbort();
+        else {
+          signal.addEventListener("abort", onAbort, { once: true });
+          stopListening = () => signal.removeEventListener("abort", onAbort);
+        }
+      }
+
       const runIt = async () => {
         await acquireSlot();
         try {
@@ -353,7 +399,11 @@ export default function subagent(pi: ExtensionAPI) {
         };
       }
 
-      await runIt();
+      try {
+        await runIt();
+      } finally {
+        if (stopListening) stopListening();
+      }
       return {
         content: [{ type: "text", text: formatRunResult(run) }],
         details: { id: run.id, status: run.status, tokens: run.tokens, worktree: isolation?.path ?? null },
@@ -433,11 +483,9 @@ export default function subagent(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    // A child cannot outlive the session that asked for it.
     for (const run of runs.values()) {
-      if (run.status === "running") {
-        run.status = "aborted";
-        run.finishedAt = Date.now();
-      }
+      if (run.status === "running") cancelRun(run, "session-switch");
     }
     if (ctx.hasUI) ctx.ui.setWidget("subagent", undefined);
   });
