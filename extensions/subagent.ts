@@ -46,6 +46,7 @@ import {
 } from "../src/ask.ts";
 import { buildMentionMessage, findMentions } from "../src/mentions.ts";
 import { LiveChildren, cancelNote, type CancelReason } from "../src/cancel.ts";
+import { DELIVERY_TYPE, deliveryMessage, pendingResult } from "../src/pending.ts";
 import {
   consentQuestion,
   decideConsent,
@@ -448,6 +449,22 @@ export default function subagent(pi: ExtensionAPI) {
         // v0.2: beyond the concurrency cap runs queue instead of rejecting.
         void runIt().then(() => {
           notify(uiCtx, `subagent ${run.id}: ${run.status}`, run.status === "done" ? "info" : "warning");
+          // The report goes to the agent, not just to the screen. Without
+          // this its only way to learn the run had finished was to ask again,
+          // which is why the not-ready answer can now tell it not to.
+          try {
+            pi.sendMessage(
+              {
+                customType: DELIVERY_TYPE,
+                content: deliveryMessage(run.id, "subagent", formatRunResult(run)),
+                display: true,
+                details: { id: run.id, status: run.status, tokens: run.tokens },
+              },
+              { deliverAs: "followUp", triggerTurn: true },
+            );
+          } catch {
+            // Delivery is a convenience; agent_result still works.
+          }
         });
         return {
           content: [
@@ -481,6 +498,16 @@ export default function subagent(pi: ExtensionAPI) {
       if (!run) {
         const known = [...runs.keys()].sort().join(", ") || "(none this session)";
         throw new Error(`No run "${params.id}". Known runs: ${known}`);
+      }
+      if (run.status === "running") {
+        const pending = pendingResult({
+          id: run.id,
+          kind: "running",
+          startedAt: run.startedAt,
+          now: Date.now(),
+          collectWith: "agent_result",
+        });
+        return { content: [{ type: "text", text: pending.text }], details: pending.details as never };
       }
       return {
         content: [{ type: "text", text: formatRunResult(run) }],

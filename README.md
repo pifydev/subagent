@@ -90,6 +90,15 @@ Measured across qwen3-235b, gpt-5.5 and claude-sonnet-4.5: six runs out of six a
 
 delegates to both, one `agent_run` each, with no need to describe the roster to the model first. The instruction rides with the turn as a hidden message rather than a system-prompt edit, so the request prefix stays byte-identical and the **prompt cache survives** the turn that is about to fan out. An `@` inside an email address or a path is not a mention.
 
+## A background run comes back to you
+
+A background run used to give the model one way to learn it had finished: call `agent_result` again. "Still running — call agent_result later" is an instruction to spin, and models follow it, burning a turn and a request per check while the thing they are waiting on has not moved.
+
+Two changes close that loop, and only together:
+
+- **The report is delivered.** When a background run finishes it is pushed into the conversation as the agent's next turn, wrapped so it explains why it arrived unasked and what to do if the agent had already moved on. Verified against pi's real provider payloads: after the agent said it had started the run and stopped, the finished report reached the model on its own.
+- **Asking early is answered, not punished.** `agent_result` on a run still in flight returns a normal structured result — not an error, which would invite the model's own retry machinery into a loop over a condition only time resolves. It carries `retryable`, how long it has been going, `pollRequired: false`, and says plainly to get on with something else.
+
 ## Behaviour
 
 - **Stopping stops the child.** Pressing Esc, or switching away from the session, aborts the child session rather than leaving it talking to the provider on your money. A run cancelled that way keeps that verdict and says why.
