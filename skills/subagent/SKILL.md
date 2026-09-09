@@ -1,6 +1,6 @@
 ---
 name: subagent
-description: Use when a task benefits from delegation to a focused child agent - code review by fresh eyes, parallel read-only research, or a scoped implementation task - explains agent_run/agent_result and how to write good task briefs
+description: Use when a task benefits from delegation to a focused child agent - code review by fresh eyes, parallel read-only research, or a scoped implementation task
 ---
 
 # Subagents
