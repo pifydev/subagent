@@ -75,7 +75,9 @@ try {
       "--model", MODEL,
       "--no-extensions",
       "-e", probe,
-      "-p", "Call the slow_thing tool once, then tell me what it returned.",
+      // Wrapped: unquoted sentences reach pi one prompt per word on Windows
+      // under shell:true (see task/test/live/sweep-wire.mjs).
+      "-p", '"Call the slow_thing tool once, then tell me what it returned."',
     ],
     {
       cwd: repo,

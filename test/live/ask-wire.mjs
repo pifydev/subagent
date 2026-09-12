@@ -46,7 +46,10 @@ try {
       "--no-extensions",
       "-e", probe,
       "-e", join(PKG, "extensions", "subagent.ts"),
-      "-p", 'Use agent_run with agent="scout" and task="reply with the single word DONE".',
+      // Wrapped in literal double quotes (inner quoting switched to single,
+      // which cmd.exe passes through): an unwrapped sentence reaches pi one
+      // prompt per word on Windows (see task/test/live/sweep-wire.mjs).
+      "-p", '"Use agent_run with agent=scout and task=\'reply with the single word DONE\'."',
     ],
     {
       cwd: repo,
