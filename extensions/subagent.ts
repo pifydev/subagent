@@ -374,6 +374,10 @@ export default function subagent(pi: ExtensionAPI) {
   pi.registerTool({
     name: "agent_run",
     label: "Run subagent",
+    promptSnippet: "Delegate one self-contained task to a child agent",
+    promptGuidelines: [
+      "Reach for the smallest delegation that fits: agent_run for one task, swarm_run for many independent ones, workflow when the steps depend on each other.",
+    ],
     description:
       "Delegate one scoped task to a child agent. agent: reviewer (read-only review), scout " +
       "(read-only exploration/research), worker (full tools, implements a task), or a custom type " +
@@ -497,6 +501,7 @@ export default function subagent(pi: ExtensionAPI) {
   pi.registerTool({
     name: "agent_result",
     label: "Subagent result",
+    promptSnippet: "Collect the report from a background child agent",
     description: "Fetch the report of a background subagent by id (from agent_run).",
     parameters: Type.Object({
       id: Type.String({ description: "Run id, e.g. reviewer-1" }),
