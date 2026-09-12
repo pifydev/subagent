@@ -234,6 +234,33 @@ export default function subagent(pi: ExtensionAPI) {
           ]
         : [];
 
+      // `reload()` is not optional. `createAgentSession` only loads a resource
+      // loader it builds itself; one passed in is used exactly as handed over,
+      // and a fresh DefaultResourceLoader resolves neither `systemPrompt` nor
+      // `appendSystemPrompt` until it loads. Without it the child ran with no
+      // instructions at all — the call succeeds, the model answers, and it
+      // answers as a generic assistant with nothing to say it went wrong.
+      const loader = new DefaultResourceLoader({
+        cwd: workDir ?? ctx.cwd,
+        agentDir: getAgentDir(),
+        noExtensions: true,
+        noPromptTemplates: true,
+        noThemes: true,
+        // system_prompt_mode: replace drops the parent's prompt so a
+        // specialist is not also told to be this project's coding
+        // assistant; inherit_skills: false keeps a focused child out of
+        // the project's whole skill surface.
+        noSkills: !def.inheritSkills,
+        ...(def.systemPromptMode === "replace" ? {} : { systemPrompt: promptOptions.customPrompt }),
+        appendSystemPrompt: [
+          ...(def.systemPromptMode === "replace" || !promptOptions.appendSystemPrompt
+            ? []
+            : [promptOptions.appendSystemPrompt]),
+          def.systemPrompt,
+          childFraming(customTools.length > 0),
+        ],
+      });
+      await loader.reload();
       const created = await createAgentSession({
         sessionManager: SessionManager.inMemory(workDir ?? ctx.cwd),
         model,
@@ -243,26 +270,7 @@ export default function subagent(pi: ExtensionAPI) {
         // child is told it has no such tool. Found the hard way.
         tools: customTools.length > 0 ? [...def.tools, ASK_TOOL_NAME] : def.tools,
         customTools: customTools as never,
-        resourceLoader: new DefaultResourceLoader({
-          cwd: workDir ?? ctx.cwd,
-          agentDir: getAgentDir(),
-          noExtensions: true,
-          noPromptTemplates: true,
-          noThemes: true,
-          // system_prompt_mode: replace drops the parent's prompt so a
-          // specialist is not also told to be this project's coding
-          // assistant; inherit_skills: false keeps a focused child out of
-          // the project's whole skill surface.
-          noSkills: !def.inheritSkills,
-          ...(def.systemPromptMode === "replace" ? {} : { systemPrompt: promptOptions.customPrompt }),
-          appendSystemPrompt: [
-            ...(def.systemPromptMode === "replace" || !promptOptions.appendSystemPrompt
-              ? []
-              : [promptOptions.appendSystemPrompt]),
-            def.systemPrompt,
-            childFraming(customTools.length > 0),
-          ],
-        }),
+        resourceLoader: loader,
       });
       session = created.session;
       releaseLive = live.register(run.id, session);
