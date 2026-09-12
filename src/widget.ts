@@ -1,3 +1,4 @@
+import { clampRows, clampWidth, MAX_WIDGET_ROWS } from "./widget-clamp.ts";
 import type { RunState, ThemeLike } from "./types.ts";
 
 const WIDTH = 54;
@@ -42,17 +43,19 @@ export function buildWidgetLines(runs: RunState[], theme: ThemeLike, now: number
   const pad = Math.max(1, WIDTH - title.length - hint.length);
   lines.push(dim(`╭${title}${"─".repeat(pad)}${hint}╮`));
 
-  for (const run of visible) {
+  const rows = visible.map((run) => {
     const paint =
       run.status === "running"
         ? (s: string) => theme.fg("warning", s)
         : run.status === "done"
           ? (s: string) => theme.fg("success", s)
           : (s: string) => theme.fg("error", s);
-    const head = paint(`${icon(run.status)} ${run.id}`);
+    const head = paint(`${icon(run.status)} ${clampWidth(run.id, 16)}`);
     const stats = dim(` · ${tokens(run.tokens)} tok · ${elapsed(run, now)}`);
-    const task = run.task.length > 30 ? `${run.task.slice(0, 30)}…` : run.task;
-    lines.push(`${dim("│ ")}${head}${stats} ${dim(task)}`);
+    return `${dim("│ ")}${head}${stats} ${dim(clampWidth(run.task, 30))}`;
+  });
+  for (const row of clampRows(rows, MAX_WIDGET_ROWS, (hidden) => dim(`│ … +${hidden} more`))) {
+    lines.push(row);
   }
 
   lines.push(dim(`╰${"─".repeat(WIDTH)}╯`));
