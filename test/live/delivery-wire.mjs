@@ -1,13 +1,20 @@
 /**
- * Does a finished background run actually reach the model?
+ * Does a finished background run's report reach the model unasked?
  *
- * The not-ready answer now tells the agent "do not poll, the result is
- * delivered to you". That is a promise, and if delivery does not work it is a
- * lie that strands the agent waiting for something that never arrives. Only
- * the provider payload can settle it, so this reads every request pi sends
- * and looks for the report in one of them.
+ * The suite-wide review found the previous version of this test measured
+ * print-mode teardown, not delivery: `pi -p` disposes the runtime the moment
+ * the parent's prompt resolves, the emitted session_shutdown makes subagent
+ * cancel its own still-running child, and the delivery then fired into a
+ * disposed session where the error is swallowed. The only pass path was the
+ * child finishing while the parent still streamed — a race a multi-round-trip
+ * child structurally loses. A real TUI session outlives its children; print
+ * mode does not, so the probe holds the parent's last turn open until the
+ * child's result entry lands on the branch, then releases. The queued
+ * follow-up delivery triggers the next turn, and THAT turn's provider payload
+ * is where the claim is settled — the held-turn technique memory's
+ * observe-wire proved, standing in for a session that is simply still alive.
  *
- *   bun run test/live/delivery-wire.mjs
+ *   node test/live/delivery-wire.mjs
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -35,6 +42,26 @@ const PROBE_SOURCE = [
   '      pendingAnswer: text.includes("Do not poll"),',
   "    }) + String.fromCharCode(10));",
   "  });",
+  // Hold the parent's turn open until the background child's result entry
+  // appears on the branch, so print mode cannot tear the session down under
+  // the run. A real session stays alive on its own; only -p needs this.
+  "  let held = false;",
+  '  pi.on("agent_end", async (_event, ctx) => {',
+  "    if (held) return;",
+  "    held = true;",
+  "    const deadline = Date.now() + 120000;",
+  "    for (;;) {",
+  "      const finished = ctx.sessionManager.getBranch().some((e) => {",
+  "        const entry = e || {};",
+  '        return entry.customType === "subagent-result" && entry.data && entry.data.status && entry.data.status !== "running";',
+  "      });",
+  "      if (finished || Date.now() > deadline) {",
+  '        appendFileSync(process.env.DELIVERY_OUT, JSON.stringify({ waited: true, finished }) + String.fromCharCode(10));',
+  "        return;",
+  "      }",
+  "      await new Promise((r) => setTimeout(r, 1500));",
+  "    }",
+  "  });",
   "}",
 ].join(NL);
 
@@ -58,16 +85,18 @@ try {
     {
       cwd: repo,
       encoding: "utf8",
-      timeout: 300_000,
+      timeout: 420_000,
       shell: true,
       windowsHide: true,
       env: { ...process.env, DELIVERY_OUT: out },
     },
   );
 
-  const requests = existsSync(out)
+  const lines = existsSync(out)
     ? readFileSync(out, "utf8").split(NL).filter(Boolean).map((l) => JSON.parse(l))
     : [];
+  const requests = lines.filter((l) => l.delivered !== undefined);
+  const wait = lines.find((l) => l.waited);
 
   let passed = 0;
   let failed = 0;
@@ -77,14 +106,20 @@ try {
   };
 
   const delivered = requests.filter((r) => r.delivered).length;
-  console.log(`requests: ${requests.length}, carrying the delivered report: ${delivered}`);
+  console.log(
+    `requests: ${requests.length}, carrying the delivered report: ${delivered}, child finished: ${wait ? wait.finished : "unknown"}`,
+  );
 
   check("requests were captured", requests.length > 0, `${requests.length}`);
-  check("the finished run's report reached the model unasked", delivered > 0);
+  check(
+    "the background child actually finished while the session lived",
+    wait !== undefined && wait.finished === true,
+  );
+  check("the finished run's report reached the model unasked", delivered > 0, `${delivered} request(s)`);
 
   console.log(`${NL}${passed}/${passed + failed} passed`);
   process.exitCode = failed === 0 ? 0 : 1;
 } finally {
-  rmSync(home, { recursive: true, force: true });
-  rmSync(repo, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  rmSync(repo, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }

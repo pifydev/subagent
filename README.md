@@ -76,7 +76,7 @@ For CI, set `PIFY_TRUST_PROJECT=1`. It is an environment variable rather than a 
 
 ## A child can ask instead of guessing
 
-A scoped child that hits a decision it should not be making — an unstated product, API or scope choice, or missing access — calls `ask_supervisor`, and the question reaches **you** through the usual dialog.
+A scoped child that hits a decision it should not be making — an unstated product, API or scope choice, or missing access — calls `ask_supervisor`, and the question reaches **you** through the usual dialog. Only when there is a UI to ask through: a headless run has nobody to answer, so the tool is deliberately not offered there — measured in `test/live/ask-wire.mjs` (the tool absent headless, `agent_run` still present). The offered-when-interactive half needs a TUI, which a scripted `-p` probe cannot see into; it is exercised by using it, not by a test that fakes it.
 
 It reaches you rather than the parent agent for a structural reason: the parent is blocked inside the tool call that spawned the child, so it could not answer anyway. And the decision is yours regardless.
 
@@ -96,7 +96,7 @@ A background run used to give the model one way to learn it had finished: call `
 
 Two changes close that loop, and only together:
 
-- **The report is delivered.** When a background run finishes it is pushed into the conversation as the agent's next turn, wrapped so it explains why it arrived unasked and what to do if the agent had already moved on. Verified against pi's real provider payloads: after the agent said it had started the run and stopped, the finished report reached the model on its own.
+- **The report is delivered.** When a background run finishes it is pushed into the conversation as the agent's next turn, wrapped so it explains why it arrived unasked and what to do if the agent had already moved on. Verified against pi's real provider payloads (`test/live/delivery-wire.mjs`, 3/3): the child finishes while the session lives, and the report reaches the model on its own. One honest caveat the first version of this test taught: the session has to still be alive when the child finishes. A `pi -p` run tears the session down the moment the prompt resolves — cancelling children with it — so the test holds the last turn open to stand in for a real interactive session; delivery is a property of sessions that outlive their children, which interactive ones do and print-mode ones do not.
 - **Asking early is answered, not punished.** `agent_result` on a run still in flight returns a normal structured result — not an error, which would invite the model's own retry machinery into a loop over a condition only time resolves. It carries `retryable`, how long it has been going, `pollRequired: false`, and says plainly to get on with something else.
 
 ## Behaviour

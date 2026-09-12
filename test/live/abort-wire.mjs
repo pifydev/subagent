@@ -119,6 +119,6 @@ try {
   console.log(`${NL}${passed}/${passed + failed} passed (pi exited after ${elapsed}ms)`);
   process.exitCode = failed === 0 && records.length > 0 ? 0 : 1;
 } finally {
-  rmSync(home, { recursive: true, force: true });
-  rmSync(repo, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  rmSync(repo, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }

@@ -1,12 +1,22 @@
 /**
- * Does the child actually receive `ask_supervisor` on the wire?
+ * ask_supervisor and headless runs: the fail-closed half, measured.
  *
- * A tool nobody calls has two very different explanations — the model chose
- * not to, or it was never offered — and only the provider payload tells them
- * apart. This drives the real extension through pi and reads the tool list
- * out of every request the child makes.
+ * The suite-wide review found the old version of this test could
+ * structurally never pass: in `-p` print mode ctx.hasUI is false, so the
+ * extension deliberately does not register ask_supervisor — and even when it
+ * is registered, it lives on the CHILD session, whose noExtensions loader
+ * means the child's provider requests never pass through this parent-side
+ * probe. The test was asserting on bytes it could not see, and its failure
+ * measured the harness, not the feature.
  *
- *   bun run test/live/ask-wire.mjs
+ * What -p CAN measure is the design's fail-closed half: a headless run has
+ * nobody to answer a supervisor question, so the tool must NOT be offered.
+ * That is asserted here for the parent payloads, plus the split-brain guard:
+ * agent_run itself must still be offered, or the gate silenced more than the
+ * question tool. The offered-when-a-UI-exists half needs a TUI and is
+ * documented in the README's honest-status line instead of being faked here.
+ *
+ *   node test/live/ask-wire.mjs
  */
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
@@ -68,13 +78,27 @@ try {
   console.log(`requests captured: ${requests.length}`);
   requests.forEach((names, i) => console.log(`  #${i + 1}: ${names.join(", ") || "(no tools)"}`));
 
-  const offered = requests.some((names) => names.includes("ask_supervisor"));
-  console.log(`\nask_supervisor offered to a child: ${offered ? "YES" : "NO"}`);
-  if (!offered) {
-    console.log("stderr:", (result.stderr || "").slice(0, 300));
-  }
-  process.exitCode = requests.length > 0 && offered ? 0 : 1;
+  let passed = 0;
+  let failed = 0;
+  const check = (name, ok, detail = "") => {
+    console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? ` — ${detail}` : ""}`);
+    ok ? passed++ : failed++;
+  };
+
+  check("requests were captured", requests.length > 0, `${requests.length}`);
+  check(
+    "headless: ask_supervisor is NOT offered — nobody is there to answer it",
+    requests.length > 0 && !requests.some((names) => names.includes("ask_supervisor")),
+  );
+  check(
+    "and agent_run still is — the gate silenced the question, not the package",
+    requests.some((names) => names.includes("agent_run")),
+  );
+  if (failed > 0) console.log("stderr:", (result.stderr || "").slice(0, 300));
+
+  console.log(`\n${passed}/${passed + failed} passed`);
+  process.exitCode = failed === 0 ? 0 : 1;
 } finally {
-  rmSync(home, { recursive: true, force: true });
-  rmSync(repo, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  rmSync(repo, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }

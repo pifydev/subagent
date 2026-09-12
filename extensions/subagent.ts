@@ -348,7 +348,14 @@ export default function subagent(pi: ExtensionAPI) {
           // double-dispose fine
         }
       }
-      pi.appendEntry(RESULT_ENTRY, run);
+      try {
+        pi.appendEntry(RESULT_ENTRY, run);
+      } catch {
+        // A /reload or session switch while this child ran invalidates the
+        // captured pi handle ("ctx is stale"); the run's result then cannot
+        // be persisted, but throwing here would turn a finished child into an
+        // unhandled rejection that takes the whole process down.
+      }
       renderWidget();
     }
   }
@@ -459,12 +466,12 @@ export default function subagent(pi: ExtensionAPI) {
 
       if (background) {
         // v0.2: beyond the concurrency cap runs queue instead of rejecting.
-        void runIt().then(() => {
-          notify(uiCtx, `subagent ${run.id}: ${run.status}`, run.status === "done" ? "info" : "warning");
-          // The report goes to the agent, not just to the screen. Without
-          // this its only way to learn the run had finished was to ask again,
-          // which is why the not-ready answer can now tell it not to.
-          try {
+        void runIt()
+          .then(() => {
+            notify(uiCtx, `subagent ${run.id}: ${run.status}`, run.status === "done" ? "info" : "warning");
+            // The report goes to the agent, not just to the screen. Without
+            // this its only way to learn the run had finished was to ask
+            // again, which is why the not-ready answer can now tell it not to.
             pi.sendMessage(
               {
                 customType: DELIVERY_TYPE,
@@ -474,10 +481,13 @@ export default function subagent(pi: ExtensionAPI) {
               },
               { deliverAs: "followUp", triggerTurn: true },
             );
-          } catch {
-            // Delivery is a convenience; agent_result still works.
-          }
-        });
+          })
+          .catch(() => {
+            // The whole chain, not just sendMessage: a /reload mid-run makes
+            // every captured pi/ctx handle throw "ctx is stale", and an
+            // uncaught rejection here takes the process down with the run's
+            // work. Delivery is a convenience; agent_result still works.
+          });
         return {
           content: [
             { type: "text", text: `Started ${run.id} in the background. Collect with agent_result id="${run.id}".` },

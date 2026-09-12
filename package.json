@@ -1,6 +1,6 @@
 {
   "name": "@pify/subagent",
-  "version": "0.10.3",
+  "version": "0.10.4",
   "description": "Spawn scoped subagents from within a pi session: agent_run/agent_result tools, Claude Code-compatible agent types, turn caps and tool allowlists",
   "keywords": [
     "pi-package",
