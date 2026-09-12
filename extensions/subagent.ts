@@ -33,6 +33,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { loadAgentDefs } from "../src/defs.ts";
+import { withUiLock } from "../src/ui-lock.ts";
 import {
   ASK_BUDGET,
   ASK_EXHAUSTED,
@@ -162,9 +163,11 @@ export default function subagent(pi: ExtensionAPI) {
     });
     if (verdict !== "ask") return verdict === "allow";
 
-    const approved = await ctx.ui.confirm(
-      "Load this project's agent definitions?",
-      consentQuestion("its own agent definitions, which override the builtins of the same name", dir),
+    const approved = await withUiLock(() =>
+      ctx.ui.confirm(
+        "Load this project's agent definitions?",
+        consentQuestion("its own agent definitions, which override the builtins of the same name", dir),
+      ),
     );
     try {
       writeFileSync(file, `${JSON.stringify(writeConsent(store, ctx.cwd, "agents", approved), null, 2)}
@@ -221,9 +224,11 @@ export default function subagent(pi: ExtensionAPI) {
                   return { content: [{ type: "text", text: ASK_EXHAUSTED }], details: {} };
                 }
                 questionsLeft--;
-                const answer = await ctx.ui.input(
-                  askTitle(def.name, params.reason),
-                  askBody(params.question, params.context).slice(0, 500),
+                const answer = await withUiLock(() =>
+                  ctx.ui.input(
+                    askTitle(def.name, params.reason),
+                    askBody(params.question, params.context).slice(0, 500),
+                  ),
                 );
                 return {
                   content: [{ type: "text", text: formatAnswer(answer ?? null) }],
