@@ -29,6 +29,13 @@ export interface PendingInput {
   now: number;
   /** What the caller asks for to collect it, e.g. `agent_result`. */
   collectWith: string;
+  /**
+   * Whether a UI/interactive session is present. Delivery needs a session
+   * that outlives the run; a headless `pi -p` run tears down when the prompt
+   * resolves, so "it will be delivered, do not poll" is a promise that cannot
+   * be kept there. Default true so existing callers keep the interactive text.
+   */
+  interactive?: boolean;
 }
 
 export interface PendingResult {
@@ -39,8 +46,12 @@ export interface PendingResult {
     /** True: this will resolve on its own. It is a wait, not a failure. */
     retryable: boolean;
     elapsedMs: number;
-    /** False, and load-bearing: there is nothing to poll for. */
-    pollRequired: false;
+    /**
+     * Interactive: false, and load-bearing — there is nothing to poll for.
+     * Headless: true — the session ends with this turn, so the model MUST
+     * collect within it or the result is lost.
+     */
+    pollRequired: boolean;
   };
 }
 
@@ -58,15 +69,28 @@ function elapsed(ms: number): string {
 export function pendingResult(input: PendingInput): PendingResult {
   const ms = Math.max(0, input.now - input.startedAt);
   const state = input.kind === "queued" ? "queued behind the concurrency cap" : "still running";
+  // A headless run has no session to deliver into — it ends when this turn
+  // does. Telling the model "do not poll, it will be delivered" there strands
+  // it awaiting a message that never comes; it must collect within the turn.
+  const headless = input.interactive === false;
+  const text = headless
+    ? [
+        `${input.id} is ${state} (${elapsed(ms)}).`,
+        "",
+        "This is a headless run: nothing is delivered after your turn ends. Call",
+        `${input.collectWith} again in this same turn until it returns the result — do not end`,
+        "your turn expecting to be picked back up.",
+      ].join("\n")
+    : [
+        `${input.id} is ${state} (${elapsed(ms)}).`,
+        "",
+        "Do not poll for it. The result is delivered to you automatically the moment it lands,",
+        `so there is nothing to wait for here — carry on with other work, or finish your turn and`,
+        `you will be picked back up. ${input.collectWith} is only needed if you want it early.`,
+      ].join("\n");
   return {
-    text: [
-      `${input.id} is ${state} (${elapsed(ms)}).`,
-      "",
-      "Do not poll for it. The result is delivered to you automatically the moment it lands,",
-      `so there is nothing to wait for here — carry on with other work, or finish your turn and`,
-      `you will be picked back up. ${input.collectWith} is only needed if you want it early.`,
-    ].join("\n"),
-    details: { id: input.id, status: input.kind, retryable: true, elapsedMs: ms, pollRequired: false },
+    text,
+    details: { id: input.id, status: input.kind, retryable: true, elapsedMs: ms, pollRequired: headless },
   };
 }
 

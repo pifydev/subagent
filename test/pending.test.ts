@@ -56,6 +56,39 @@ test("a delivered result explains why it arrived unasked", () => {
   assert.match(message, /already moved on/);
 });
 
+test("a headless run is told to collect within the turn, not to wait for delivery", () => {
+  const r = pendingResult({
+    id: "reviewer-1",
+    kind: "running",
+    startedAt: 0,
+    now: 3_000,
+    collectWith: "agent_result",
+    interactive: false,
+  });
+  // Headless pi -p tears down when the prompt resolves; delivery never comes.
+  assert.equal(r.details.pollRequired, true, "there is no push, so it must collect");
+  assert.match(r.text, /headless run/);
+  assert.match(r.text, /agent_result again in this same turn/);
+  assert.match(r.text, /do not end/i);
+  // It must NOT carry the interactive promise that would strand it.
+  assert.ok(!/delivered to you automatically/.test(r.text), "no false delivery promise headless");
+});
+
+test("interactive defaults on, so existing callers keep the no-poll answer", () => {
+  const on = pendingResult({ id: "a", kind: "running", startedAt: 0, now: 0, collectWith: "agent_result" });
+  const explicit = pendingResult({
+    id: "a",
+    kind: "running",
+    startedAt: 0,
+    now: 0,
+    collectWith: "agent_result",
+    interactive: true,
+  });
+  assert.equal(on.details.pollRequired, false);
+  assert.equal(explicit.details.pollRequired, false);
+  assert.match(on.text, /Do not poll/);
+});
+
 test("the delivery type is stable, since renderers and tests key on it", () => {
   assert.equal(DELIVERY_TYPE, "pify-background-result");
 });
