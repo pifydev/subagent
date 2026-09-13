@@ -1,6 +1,6 @@
 # @pify/subagent
 
-[![npm version](https://img.shields.io/npm/v/@pify/subagent)](https://www.npmjs.com/package/@pify/subagent) [![npm downloads](https://img.shields.io/npm/dm/@pify/subagent)](https://www.npmjs.com/package/@pify/subagent)
+[![CI](https://github.com/pifydev/subagent/actions/workflows/ci.yml/badge.svg)](https://github.com/pifydev/subagent/actions/workflows/ci.yml) [![npm version](https://img.shields.io/npm/v/@pify/subagent)](https://www.npmjs.com/package/@pify/subagent) [![npm downloads](https://img.shields.io/npm/dm/@pify/subagent)](https://www.npmjs.com/package/@pify/subagent)
 
 Spawn scoped subagents from within a [pi](https://github.com/earendil-works/pi) session. One tool call, one focused child agent — with its own tool allowlist, model, thinking level, and turn cap.
 
