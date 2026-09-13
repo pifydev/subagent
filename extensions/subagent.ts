@@ -69,6 +69,8 @@ import {
 
 const RESULT_ENTRY = "subagent-result";
 const MENTION_ENTRY = "subagent-mention";
+const CLEAN_WORKTREE_NOTE =
+  "Ran isolated in a temporary worktree; it changed nothing, so the worktree and its branch were removed.";
 
 type UiContext = ExtensionContext;
 
@@ -464,8 +466,20 @@ export default function subagent(pi: ExtensionAPI) {
         } finally {
           releaseSlot();
         }
-        if (isolation && run.result !== null) {
-          run.result = `${run.result}\n\n${isolationNote(isolation)}`;
+        if (isolation) {
+          // A worktree the child left untouched is removed with its branch —
+          // the common case for a review or a search, and the cleanup all
+          // three READMEs promise but none performed: removeIfUnchanged was
+          // imported and never called, so every isolated run leaked a
+          // directory and an agent/<slug> branch under ~/.worktrees forever.
+          // Anything changed or committed is kept, and only then does the
+          // merge note make sense.
+          const removed = removeIfUnchanged(uiCtx.cwd, isolation);
+          if (!removed && run.result !== null) {
+            run.result = `${run.result}\n\n${isolationNote(isolation)}`;
+          } else if (removed && run.result !== null) {
+            run.result = `${run.result}\n\n${CLEAN_WORKTREE_NOTE}`;
+          }
         }
       };
 
@@ -521,7 +535,7 @@ export default function subagent(pi: ExtensionAPI) {
     parameters: Type.Object({
       id: Type.String({ description: "Run id, e.g. reviewer-1" }),
     }),
-    async execute(_id, params: { id: string }) {
+    async execute(_id, params: { id: string }, _signal, _onUpdate, ctx) {
       const run = runs.get(params.id.trim());
       if (!run) {
         const known = [...runs.keys()].sort().join(", ") || "(none this session)";
@@ -534,6 +548,7 @@ export default function subagent(pi: ExtensionAPI) {
           startedAt: run.startedAt,
           now: Date.now(),
           collectWith: "agent_result",
+          interactive: (ctx as { hasUI?: boolean }).hasUI !== false,
         });
         return { content: [{ type: "text", text: pending.text }], details: pending.details as never };
       }
