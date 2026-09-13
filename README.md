@@ -1,5 +1,7 @@
 # @pify/subagent
 
+[![npm version](https://img.shields.io/npm/v/@pify/subagent)](https://www.npmjs.com/package/@pify/subagent) [![npm downloads](https://img.shields.io/npm/dm/@pify/subagent)](https://www.npmjs.com/package/@pify/subagent)
+
 Spawn scoped subagents from within a [pi](https://github.com/earendil-works/pi) session. One tool call, one focused child agent — with its own tool allowlist, model, thinking level, and turn cap.
 
 Part of the [Pify suite](https://github.com/pifydev). Install with [`pify install subagent`](https://github.com/pifydev/cli) or `pi install npm:@pify/subagent`.
