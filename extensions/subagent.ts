@@ -34,6 +34,7 @@ import { join } from "node:path";
 
 import { loadAgentDefs } from "../src/defs.ts";
 import { withUiLock } from "../src/ui-lock.ts";
+import { LoopGuard } from "../src/loop-guard.ts";
 import {
   ASK_BUDGET,
   ASK_EXHAUSTED,
@@ -187,6 +188,7 @@ export default function subagent(pi: ExtensionAPI) {
     let session: AgentSession | null = null;
     let unsubscribe: (() => void) | null = null;
     let releaseLive: (() => void) | null = null;
+    let stallReason: string | null = null;
     try {
       let model = ctx.model ?? null;
       if (def.model) {
@@ -282,11 +284,38 @@ export default function subagent(pi: ExtensionAPI) {
       session = created.session;
       releaseLive = live.register(run.id, session);
 
+      const guard = new LoopGuard();
       unsubscribe = session.subscribe((event) => {
-        if (event.type === "message_end" && (event as { message?: { role?: string } }).message?.role === "assistant") {
+        const message = (
+          event as {
+            message?: {
+              role?: string;
+              usage?: { totalTokens?: number };
+              content?: Array<{ type?: string; text?: string }>;
+            };
+          }
+        ).message;
+        if (event.type === "message_end" && message?.role === "assistant") {
           run.turns++;
-          const usage = (event as { message?: { usage?: { totalTokens?: number } } }).message?.usage;
+          const usage = message.usage;
           if (usage && typeof usage.totalTokens === "number") run.tokens += usage.totalTokens;
+
+          // A turn cap bounds cost; it does not notice a child spinning —
+          // restating the same thing every turn without calling a tool. Stop
+          // that early with a reason, rather than letting it run to the cap.
+          if (!stallReason && Array.isArray(message.content)) {
+            const usedTool = message.content.some((c) => c.type === "toolCall");
+            const turnText = message.content
+              .filter((c) => c.type === "text" && typeof c.text === "string")
+              .map((c) => c.text)
+              .join("\n");
+            const verdict = guard.observe({ text: turnText, usedTool });
+            if (verdict.stalled) {
+              stallReason = verdict.reason ?? "no progress";
+              void session?.abort().catch(() => {});
+            }
+          }
+
           renderWidget();
           if (run.turns >= def.maxTurns) {
             void session?.abort().catch(() => {});
@@ -309,13 +338,17 @@ export default function subagent(pi: ExtensionAPI) {
         .trim();
 
       // A run stopped at its turn cap is not a finished answer. Returning it
-      // unmarked reads as complete to whoever asked for it.
+      // unmarked reads as complete to whoever asked for it. A run the loop
+      // guard stopped is the same: mark it, with the reason, so the parent
+      // knows the child gave up rather than concluded.
       const cappedAtTurnLimit = run.turns >= def.maxTurns && last?.stopReason === "aborted";
-      run.result = cappedAtTurnLimit && text
-        ? `${text}
+      run.result = stallReason
+        ? `${text ? `${text}\n\n` : ""}[stopped: no progress — the child ${stallReason}]`
+        : cappedAtTurnLimit && text
+          ? `${text}
 
 [partial: stopped at the ${def.maxTurns}-turn cap for agent "${def.name}" — this answer may be unfinished]`
-        : text || null;
+          : text || null;
       // A run the user (or session teardown) already cancelled keeps that
       // verdict and its explanation — the child stopping is the consequence,
       // not a separate outcome.

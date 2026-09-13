@@ -6,6 +6,10 @@ const CHILD_BASE = [
   "Your final assistant message IS the deliverable returned to the caller —",
   "make it a complete, self-contained report. Do not end your report with questions:",
   "the caller cannot reply to it.",
+  "Close by stating each requirement from your brief and the concrete evidence it is met",
+  "(the command you ran and what it showed); mark anything you could not verify as unverified",
+  "rather than done. If you find yourself about to repeat what you just said without taking an",
+  "action, stop and report where you are stuck instead — an idle turn is wasted.",
 ].join(" ");
 
 /**
