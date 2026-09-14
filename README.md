@@ -22,6 +22,9 @@ The other half is scope. A child with four read-only tools and a fifteen-turn ca
 | `task` | string | A self-contained brief — the child cannot see your conversation |
 | `background` | boolean, optional | Return an id immediately instead of blocking; up to 4 concurrent |
 | `isolation` | `"worktree"`, optional | Run the child in its own git worktree |
+| `verify` | boolean, optional | After the worker finishes, the reviewer checks it and the worker gets one revision if needed |
+
+**Verified runs.** With `verify: true`, a finished result is handed to the `reviewer` agent, which judges it against the task and either passes it or lists the changes it needs; on changes, the worker gets **one** revision pass (in the same worktree if isolated) and the corrected result comes back with a note. It is bounded to a single round so it can never ping-pong, and best-effort — a reviewer that can't run returns the result marked unverified rather than failing the whole thing. This is `ask_supervisor`'s opposite number: escalate a decision to the human, or have a peer check the work.
 
 Foreground blocks and returns the child's report. Background returns an id and drives a live widget with spinners, token counts and elapsed time.
 

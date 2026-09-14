@@ -59,6 +59,7 @@ import {
 } from "../src/consent.ts";
 import { createIsolationWorktree, isolationNote, removeIfUnchanged, type Isolation } from "../src/isolate.ts";
 import { buildTaskPrompt, childFraming, describeDefs, formatRunResult } from "../src/prompts.ts";
+import { parseVerdict, revisionPrompt, verifyPrompt } from "../src/verify.ts";
 import { buildWidgetLines } from "../src/widget.ts";
 import {
   MAX_CONCURRENT_BACKGROUND,
@@ -405,6 +406,58 @@ export default function subagent(pi: ExtensionAPI) {
     }
   }
 
+  function mkRun(id: string, agent: string, task: string): RunState {
+    return {
+      id,
+      agent,
+      task,
+      background: false,
+      status: "running",
+      startedAt: Date.now(),
+      finishedAt: null,
+      tokens: 0,
+      turns: 0,
+      result: null,
+      error: null,
+    };
+  }
+
+  /**
+   * Auto peer-review: after a worker settles with a result, a reviewer child
+   * checks it against the task; a failed review sends the worker back for one
+   * revision (in the same worktree if isolated). Bounded to a single round so it
+   * can never ping-pong, and best-effort — a reviewer that cannot run leaves the
+   * result returned-but-unverified rather than failing the whole run.
+   */
+  async function verifyRun(ctx: UiContext, run: RunState, workerDef: AgentDef, workDir?: string): Promise<void> {
+    const reviewerDef = defs.get("reviewer");
+    if (!reviewerDef || !run.result) return;
+
+    const review = mkRun(nextId("reviewer"), "reviewer", verifyPrompt(run.task, run.result));
+    runs.set(review.id, review);
+    renderWidget(ctx);
+    await runChild(ctx, reviewerDef, review);
+    if (review.status !== "done" || !review.result) {
+      run.result = `${run.result}\n\n[verify: the reviewer did not complete — returning this result unverified]`;
+      return;
+    }
+    const verdict = parseVerdict(review.result);
+    if (verdict.passed) {
+      run.result = `${run.result}\n\n[verified: reviewer passed]`;
+      return;
+    }
+
+    const revision = mkRun(nextId(workerDef.name), workerDef.name, revisionPrompt(run.task, verdict.feedback));
+    runs.set(revision.id, revision);
+    renderWidget(ctx);
+    await runChild(ctx, workerDef, revision, workDir);
+    const notes = verdict.feedback.slice(0, 800);
+    run.result =
+      revision.status === "done" && revision.result
+        ? `${revision.result}\n\n[verified: revised once after review]\nReviewer had required:\n${notes}`
+        : `${run.result}\n\n[verify: the revision did not complete; returning the original with the review]\nReviewer had required:\n${notes}`;
+  }
+
   /**
    * Stop a run and the child it started. Both meanings of "stop" — the user's
    * abort and session teardown — come through here; marking the record
@@ -437,16 +490,21 @@ export default function subagent(pi: ExtensionAPI) {
       "background=true returns an id immediately — collect it later with agent_result. " +
       "Write the task as a complete, self-contained brief: the child sees none of this conversation. " +
       "For MUTATING tasks set isolation=worktree: the child gets its own git worktree and branch, the " +
-      "main checkout stays untouched, and the report says how to merge or discard.",
+      "main checkout stays untouched, and the report says how to merge or discard. " +
+      "Set verify=true for work worth double-checking: the reviewer agent judges the result and, if it finds " +
+      "real problems, the worker gets one revision pass before the result is returned.",
     parameters: Type.Object({
       agent: Type.String({ description: "Agent type name" }),
       task: Type.String({ description: "Complete task brief for the child" }),
       background: Type.Optional(Type.Boolean({ description: "Run without blocking (default false)" })),
       isolation: Type.Optional(Type.String({ description: "Set to worktree to run in an isolated git worktree (for mutating tasks)" })),
+      verify: Type.Optional(
+        Type.Boolean({ description: "After the worker finishes, have the reviewer check it and allow one revision (default false)" }),
+      ),
     }),
     async execute(
       _id,
-      params: { agent: string; task: string; background?: boolean; isolation?: string },
+      params: { agent: string; task: string; background?: boolean; isolation?: string; verify?: boolean },
       signal,
       _onUpdate,
       ctx,
@@ -503,6 +561,15 @@ export default function subagent(pi: ExtensionAPI) {
           await runChild(uiCtx, def, run, isolation?.path);
         } finally {
           releaseSlot();
+        }
+        // Opt-in auto peer-review, before the worktree is cleaned so a revision
+        // can still write into it. Best-effort; never fails the run.
+        if (params.verify && run.status === "done" && run.result?.trim()) {
+          try {
+            await verifyRun(uiCtx, run, def, isolation?.path);
+          } catch {
+            // verification is a convenience; the worker's result already stands
+          }
         }
         if (isolation) {
           // A worktree the child left untouched is removed with its branch —
