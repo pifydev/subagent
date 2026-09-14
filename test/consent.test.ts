@@ -1,10 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   envConsent,
   consentQuestion,
   decideConsent,
   parseConsent,
+  persistConsent,
   readConsent,
   writeConsent,
 } from "../src/consent.ts";
@@ -88,4 +92,42 @@ test("only unambiguous values count as an override", () => {
   assert.equal(envConsent({ PIFY_TRUST_PROJECT: " TRUE " }), true);
   assert.equal(envConsent({ PIFY_TRUST_PROJECT: "1" }), true);
   assert.equal(envConsent({ PIFY_TRUST_PROJECT: "no" }), false);
+});
+
+test("persistConsent re-reads before writing, so a concurrent writer's scope is not lost", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pify-consent-"));
+  const file = join(dir, "pify-project-consent.json");
+  try {
+    // Package A records its scope.
+    persistConsent(file, "/repo", "agents", true);
+    // Package B records a DIFFERENT scope for the same cwd. If it used a store
+    // captured before A's write it would clobber "agents"; re-reading keeps both.
+    persistConsent(file, "/repo", "memory", true);
+    const store = parseConsent(readFileSync(file, "utf8"));
+    assert.equal(readConsent(store, "/repo", "agents"), true, "A's scope survived");
+    assert.equal(readConsent(store, "/repo", "memory"), true, "B's scope was added");
+
+    // Simulate an external change landing between a caller's early read and its
+    // write: persistConsent must merge onto the on-disk state, not overwrite it.
+    writeFileSync(file, JSON.stringify(writeConsent({}, "/other", "yolo", true)));
+    persistConsent(file, "/repo", "observe", false);
+    const merged = parseConsent(readFileSync(file, "utf8"));
+    assert.equal(readConsent(merged, "/other", "yolo"), true, "external scope preserved");
+    assert.equal(readConsent(merged, "/repo", "observe"), false, "new scope written");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("persistConsent tolerates a missing file (first write creates it)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pify-consent-"));
+  const file = join(dir, "nested", "consent.json");
+  try {
+    // parent dir missing -> write throws; caller catches. Existing file path works:
+    const ok = join(dir, "consent.json");
+    persistConsent(ok, "/repo", "agents", true);
+    assert.equal(readConsent(parseConsent(readFileSync(ok, "utf8")), "/repo", "agents"), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

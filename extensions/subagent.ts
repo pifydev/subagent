@@ -54,8 +54,8 @@ import {
   decideConsent,
   envConsent,
   parseConsent,
+  persistConsent,
   readConsent,
-  writeConsent,
 } from "../src/consent.ts";
 import { createIsolationWorktree, isolationNote, removeIfUnchanged, type Isolation } from "../src/isolate.ts";
 import { buildTaskPrompt, childFraming, describeDefs, formatRunResult } from "../src/prompts.ts";
@@ -176,8 +176,7 @@ export default function subagent(pi: ExtensionAPI) {
       ),
     );
     try {
-      writeFileSync(file, `${JSON.stringify(writeConsent(store, ctx.cwd, "agents", approved), null, 2)}
-`);
+      persistConsent(file, ctx.cwd, "agents", approved);
     } catch {
       // An unwritable consent file costs us the memory of the answer, not the answer.
     }
