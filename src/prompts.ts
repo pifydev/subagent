@@ -49,7 +49,18 @@ export function formatRunResult(run: RunState): string {
       ? `${header}\n${run.result}`
       : `${header}\nThe child finished without producing an answer. Do not wait for it — re-run with a narrower task, or do the work here.`;
   }
-  if (run.status === "error") return `${header}\nError: ${run.error ?? "unknown failure"}`;
+  if (run.status === "error") {
+    const detail = run.error ?? "unknown failure";
+    // A failure before the child produced a single turn is almost always a
+    // config-level error (model, agent file, auth, an empty tool set) that
+    // will fail identically on every respawn — so say "fix it", not "retry".
+    // A failure mid-work means the child got partway and the brief, not the
+    // config, is the thing to change (arhen/pi-core-subagent's classification).
+    if (run.turns === 0) {
+      return `${header}\nFailed before the child started: ${detail}\nThis is a configuration error (model, agent definition, auth, or tool set) — it will fail the same way if re-run. Fix the configuration rather than retrying.`;
+    }
+    return `${header}\nFailed after ${run.turns} turn${run.turns === 1 ? "" : "s"}: ${detail}\nThe child got partway; narrow the task or do it here rather than re-running the same brief.`;
+  }
   if (run.status === "aborted") {
     return `${header}\nAborted (turn limit or user stop). Partial output:\n${run.result ?? "(none)"}`;
   }

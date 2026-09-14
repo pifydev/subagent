@@ -33,6 +33,15 @@ Foreground blocks and returns the child's report. Background returns an id and d
 
 Completed results survive `/reload`.
 
+### `agent_steer`
+
+| Parameter | Type | Notes |
+|---|---|---|
+| `id` | string | A running background run |
+| `message` | string | The instruction to inject |
+
+Redirect a background child while it runs — add a constraint, correct course, or narrow scope — and it picks the message up at its next step without restarting. A background run is a teammate you can talk to, not a fire-and-forget. Only works while the run is live; a finished one is collected with `agent_result`.
+
 ## Builtin agent types
 
 | Type | Tools | For |
@@ -99,6 +108,8 @@ A background run used to give the model one way to learn it had finished: call `
 Two changes close that loop, and only together:
 
 - **The report is delivered.** When a background run finishes it is pushed into the conversation as the agent's next turn, wrapped so it explains why it arrived unasked and what to do if the agent had already moved on. Verified against pi's real provider payloads (`test/live/delivery-wire.mjs`, 3/3): the child finishes while the session lives, and the report reaches the model on its own. One honest caveat the first version of this test taught: the session has to still be alive when the child finishes. A `pi -p` run tears the session down the moment the prompt resolves — cancelling children with it — so the test holds the last turn open to stand in for a real interactive session; delivery is a property of sessions that outlive their children, which interactive ones do and print-mode ones do not.
+- **A failure interrupts; a success waits its turn.** A finished run arrives as a follow-up, politely queued behind the current turn. A *failed* one arrives as a steer — it interrupts now — because a broken intermediate the agent is likely building on should be seen before it goes further, not after.
+- **A failure says which kind it is.** A run that died before its first turn is reported as a configuration error (model, agent file, auth, tool set) that will fail the same way on a retry — fix it, don't re-run; a run that failed partway says so and suggests narrowing the task instead.
 - **Asking early is answered, not punished.** `agent_result` on a run still in flight returns a normal structured result — not an error, which would invite the model's own retry machinery into a loop over a condition only time resolves. It carries `retryable` and how long it has been going. In an interactive session, where delivery works, it also carries `pollRequired: false` and says plainly to get on with something else. In a headless `pi -p` run, where nothing is delivered after the turn ends, it flips to `pollRequired: true` and tells the model to call `agent_result` again within the same turn — because the promise "it will arrive on its own" is one that mode cannot keep.
 
 ## Behaviour

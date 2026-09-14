@@ -162,7 +162,7 @@ test("widget renders nothing when idle", () => {
 
 test("formatRunResult per status", () => {
   assert.ok(formatRunResult(run({ status: "done", result: "all good" })).includes("all good"));
-  assert.ok(formatRunResult(run({ status: "error", error: "boom" })).includes("Error: boom"));
+  assert.ok(formatRunResult(run({ status: "error", error: "boom", turns: 3 })).includes("Failed after 3 turns: boom"));
   assert.ok(formatRunResult(run({ status: "aborted", result: "partial" })).includes("Partial output"));
   assert.ok(formatRunResult(run({ status: "running" })).includes("Still running"));
 });
@@ -372,7 +372,13 @@ test("v0.6 a finished run with no answer is never reported as still running", ()
   // the ordinary paths are unchanged
   assert.ok(formatRunResult(run({ status: "done", result: "the answer" })).includes("the answer"));
   assert.ok(formatRunResult(run({ status: "running" })).includes("Still running"));
-  assert.ok(formatRunResult(run({ status: "error", error: "boom" })).includes("Error: boom"));
+  // Error is classified: mid-work (turns>0) vs a config-level startup failure.
+  const midWork = formatRunResult(run({ status: "error", error: "boom", turns: 3 }));
+  assert.ok(midWork.includes("Failed after 3 turns: boom"), midWork);
+  assert.ok(midWork.includes("narrow the task"), midWork);
+  const startup = formatRunResult(run({ status: "error", error: "model not found", turns: 0 }));
+  assert.ok(startup.includes("Failed before the child started: model not found"), startup);
+  assert.ok(startup.includes("configuration error"), startup);
   assert.ok(formatRunResult(run({ status: "aborted", result: null })).includes("(none)"));
 });
 

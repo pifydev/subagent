@@ -96,6 +96,8 @@ export default function subagent(pi: ExtensionAPI) {
   const runs = new Map<string, RunState>();
   /** Live child sessions per run, so a stop actually reaches the children. */
   const live = new LiveChildren();
+  /** Live child sessions addressable for steering while they run in the background. */
+  const steerable = new Map<string, AgentSession>();
   const counters = new Map<string, number>();
   let lastUiCtx: UiContext | null = null;
 
@@ -283,6 +285,8 @@ export default function subagent(pi: ExtensionAPI) {
       });
       session = created.session;
       releaseLive = live.register(run.id, session);
+      // Addressable for agent_steer while it runs; removed in the finally.
+      steerable.set(run.id, session);
 
       const guard = new LoopGuard();
       unsubscribe = session.subscribe((event) => {
@@ -373,6 +377,7 @@ export default function subagent(pi: ExtensionAPI) {
       run.error = err instanceof Error ? err.message : String(err);
     } finally {
       run.finishedAt = Date.now();
+      steerable.delete(run.id);
       if (releaseLive) releaseLive();
       if (unsubscribe) {
         try {
@@ -524,6 +529,12 @@ export default function subagent(pi: ExtensionAPI) {
             // The report goes to the agent, not just to the screen. Without
             // this its only way to learn the run had finished was to ask
             // again, which is why the not-ready answer can now tell it not to.
+            // A finished child arrives as a followUp — it waits politely for
+            // the current turn. A FAILED one arrives as a steer: a broken
+            // intermediate the leader is likely building on should interrupt
+            // now, not sit in the queue until the leader has moved on
+            // (arhen/pi-core-subagent's failure-as-interrupt insight).
+            const failed = run.status !== "done";
             pi.sendMessage(
               {
                 customType: DELIVERY_TYPE,
@@ -531,7 +542,7 @@ export default function subagent(pi: ExtensionAPI) {
                 display: true,
                 details: { id: run.id, status: run.status, tokens: run.tokens },
               },
-              { deliverAs: "followUp", triggerTurn: true },
+              { deliverAs: failed ? "steer" : "followUp", triggerTurn: true },
             );
           })
           .catch(() => {
@@ -589,6 +600,47 @@ export default function subagent(pi: ExtensionAPI) {
         content: [{ type: "text", text: formatRunResult(run) }],
         details: { id: run.id, status: run.status },
       };
+    },
+  });
+
+  pi.registerTool({
+    name: "agent_steer",
+    label: "Steer subagent",
+    promptSnippet: "Redirect a running background subagent",
+    description:
+      "Send a steering message to a still-running BACKGROUND subagent (started with agent_run background:true). " +
+      "It lands at the child's next step without restarting it — use to add a constraint, correct course, or narrow " +
+      "scope mid-run. Only works while the run is live; a finished run is collected with agent_result instead.",
+    parameters: Type.Object({
+      id: Type.String({ description: "Run id of a running background subagent, e.g. reviewer-1" }),
+      message: Type.String({ description: "The steering instruction to inject into the running child" }),
+    }),
+    async execute(
+      _id,
+      params: { id: string; message: string },
+    ): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown>; isError?: boolean }> {
+      const session = steerable.get(params.id.trim());
+      if (!session) {
+        const live = [...steerable.keys()].sort().join(", ") || "(none running)";
+        return {
+          content: [{ type: "text", text: `No running subagent "${params.id}". Live now: ${live}. A finished run is collected with agent_result.` }],
+          details: {},
+          isError: true,
+        };
+      }
+      const message = String(params.message ?? "").trim();
+      if (!message) return { content: [{ type: "text", text: "Empty steering message." }], details: {}, isError: true };
+      try {
+        await session.steer(message);
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `Could not steer ${params.id}: ${err instanceof Error ? err.message : String(err)}` }],
+          details: {},
+          isError: true,
+        };
+      }
+      const clip = message.length > 60 ? `${message.slice(0, 59)}…` : message;
+      return { content: [{ type: "text", text: `Steered ${params.id}: "${clip}". It will pick this up at its next step.` }], details: { id: params.id } };
     },
   });
 
