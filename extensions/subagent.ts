@@ -59,7 +59,8 @@ import {
 } from "../src/consent.ts";
 import { createIsolationWorktree, isolationNote, removeIfUnchanged, type Isolation } from "../src/isolate.ts";
 import { buildTaskPrompt, childFraming, describeDefs, formatRunResult } from "../src/prompts.ts";
-import { parseVerdict, revisionPrompt, verifyPrompt } from "../src/verify.ts";
+import { runVerification } from "../src/verify.ts";
+import { mintRunId, seedCounters } from "../src/ids.ts";
 import { buildWidgetLines } from "../src/widget.ts";
 import {
   MAX_CONCURRENT_BACKGROUND,
@@ -130,9 +131,7 @@ export default function subagent(pi: ExtensionAPI) {
   // ── Child runner ─────────────────────────────────────────────────────
 
   function nextId(agent: string): string {
-    const n = (counters.get(agent) ?? 0) + 1;
-    counters.set(agent, n);
-    return `${agent}-${n}`;
+    return mintRunId(counters, agent);
   }
 
   /** Where the suite records which projects you approved, and for what. */
@@ -429,32 +428,20 @@ export default function subagent(pi: ExtensionAPI) {
    * result returned-but-unverified rather than failing the whole run.
    */
   async function verifyRun(ctx: UiContext, run: RunState, workerDef: AgentDef, workDir?: string): Promise<void> {
-    const reviewerDef = defs.get("reviewer");
-    if (!reviewerDef || !run.result) return;
-
-    const review = mkRun(nextId("reviewer"), "reviewer", verifyPrompt(run.task, run.result));
-    runs.set(review.id, review);
-    renderWidget(ctx);
-    await runChild(ctx, reviewerDef, review);
-    if (review.status !== "done" || !review.result) {
-      run.result = `${run.result}\n\n[verify: the reviewer did not complete — returning this result unverified]`;
-      return;
-    }
-    const verdict = parseVerdict(review.result);
-    if (verdict.passed) {
-      run.result = `${run.result}\n\n[verified: reviewer passed]`;
-      return;
-    }
-
-    const revision = mkRun(nextId(workerDef.name), workerDef.name, revisionPrompt(run.task, verdict.feedback));
-    runs.set(revision.id, revision);
-    renderWidget(ctx);
-    await runChild(ctx, workerDef, revision, workDir);
-    const notes = verdict.feedback.slice(0, 800);
-    run.result =
-      revision.status === "done" && revision.result
-        ? `${revision.result}\n\n[verified: revised once after review]\nReviewer had required:\n${notes}`
-        : `${run.result}\n\n[verify: the revision did not complete; returning the original with the review]\nReviewer had required:\n${notes}`;
+    // The reviewer gets the worker's workDir too: when the worker ran isolated,
+    // its changes live in that worktree, and a reviewer pointed at the untouched
+    // main checkout would review a diff it cannot see.
+    await runVerification(run, workDir, {
+      reviewerDef: defs.get("reviewer"),
+      workerDef,
+      mkRun,
+      nextId,
+      register: (r) => {
+        runs.set(r.id, r);
+        renderWidget(ctx);
+      },
+      runChild: (def, r, wd) => runChild(ctx, def, r, wd),
+    });
   }
 
   /**
@@ -754,6 +741,10 @@ export default function subagent(pi: ExtensionAPI) {
       const data = e.data as unknown as RunState;
       if (typeof data.id === "string" && data.status !== "running") runs.set(data.id, data);
     }
+    // The id counter is memory-only and starts empty on a fresh load; re-seed it
+    // past the replayed ids so the first new run does not mint "reviewer-1"/
+    // "agent-1" again and overwrite a live entry via runs.set().
+    seedCounters(counters, runs.keys());
     renderWidget(ctx);
   });
 
