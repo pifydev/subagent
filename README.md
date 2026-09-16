@@ -27,7 +27,7 @@ The other half is scope. A child with four read-only tools and a fifteen-turn ca
 | `gateExpect` | string, optional | Regex the gate output must match, for checks that exit 0 without proving anything |
 | `gateRepairs` | number, optional | Repair passes after a failed gate, 0–5 (default 1) |
 
-**Gated runs.** `verify` asks another model whether the work is good. A gate asks the shell. The command runs in the tree the child actually worked in — its worktree under `isolation: "worktree"` — after it finishes and after any revision, so it judges what you would merge.
+**Gated runs.** `verify` asks another model whether the work is good. A gate asks the shell. The command runs in the tree the child actually worked in — its worktree under `isolation: "worktree"` — after it finishes and after any revision, so it judges what you would merge. It runs asynchronously: pi is not frozen while a two-minute suite runs, other children's streams keep flowing, and Esc still lands. A gate that reaches its deadline is killed as a whole process tree — the shell *and* the runner it started — and reported as `timeout`.
 
 What the gate found is reported as its own fact, and it can say more than pass/fail:
 
@@ -39,7 +39,7 @@ What the gate found is reported as its own fact, and it can say more than pass/f
 | `timeout` | given its deadline and did not clear it |
 | `no_attestation` | never ran at all — a missing runner, a typo, a broken pattern |
 
-A failing gate sends the child back once with the command, the verdict and the output, then re-runs the gate; `gateRepairs: 0` turns that off. A read-only agent is never asked to repair, and a `no_attestation` verdict never triggers one — a gate that proved nothing is a bug in the gate, and sending an agent to "fix" it is how working code gets broken. If other runs were changing the same directory while the gate ran, the report says so: that verdict is true of the tree, not of this agent's work alone.
+A failing gate sends the child back once with the command, the verdict and the output, then re-runs the gate; `gateRepairs: 0` turns that off. A read-only agent is never asked to repair, and a `no_attestation` verdict never triggers one — a gate that proved nothing is a bug in the gate, and sending an agent to "fix" it is how working code gets broken. A child that ended its report with `OUTCOME: blocked` is not sent back either: it has already said the fix is not in its hands, and the test output will not change that. The gate still runs once, so the record says what the tree proves. If other runs were changing the same directory while the gate ran, the report says so: that verdict is true of the tree, not of this agent's work alone — and only runs actually in that directory count, so an isolated run's worktree is never blamed on a sibling working in the main checkout.
 
 **Outcomes.** A run now reports two facts instead of one. The status says whether the *session* finished; the outcome says whether the *task* did.
 
@@ -58,13 +58,18 @@ A gate that failed outranks a child that claims success. Without a gate the outc
 
 Foreground blocks and returns the child's report. Background returns an id and drives a live widget with spinners, token counts and elapsed time.
 
+**Verifying is a state.** Between the child finishing and its verify or gate settling, the run is not done yet — the reviewer may send it back, the gate may contradict it, a repair pass may replace its report. During that window the widget shows it as `⟳ … verifying` with the clock still running, `agent_result` answers "not ready" rather than handing out a result that is about to change, and a background run is only delivered once everything has settled.
+
 ### `agent_result`
 
 | Parameter | Type | Notes |
 |---|---|---|
 | `id` | string | The run to collect |
+| `wait` | number, optional | Seconds to block for the run to finish before answering, 0–120 (default 0) |
 
-Completed results survive `/reload`.
+Completed results survive `/reload` — and they are written to the session only once the run has fully settled, so a restored run carries its gate verdict and its outcome, not the clean success it looked like before the gate ran. Failing gate output is kept to its last 4000 characters in the session file.
+
+`wait` exists for headless runs. Interactively, a finished background run is delivered on its own and there is nothing to poll for; under `pi -p` the session ends with the turn, so the only way to collect was to call again — a tight loop. `wait: 30` turns that into one call that returns when the run lands, or after thirty seconds with the not-ready answer. Esc ends the wait early.
 
 ### `agent_steer`
 
@@ -147,8 +152,8 @@ Two changes close that loop, and only together:
 
 ## Behaviour
 
-- **Stopping stops the child.** Pressing Esc, or switching away from the session, aborts the child session rather than leaving it talking to the provider on your money. A run cancelled that way keeps that verdict and says why.
-- **Honest endings.** A run stopped at its turn cap comes back marked `[partial: stopped at the N-turn cap]` instead of reading like a finished answer. A child that stopped cleanly and produced no text says exactly that — it used to be recorded as `done` with an empty result, which the report then rendered as *"still running"*, sending the parent to poll a run that had already ended.
+- **Stopping stops the child — and its helpers.** Pressing Esc, or switching away from the session, aborts the child session rather than leaving it talking to the provider on your money. The reviewer, revision and repair children that `verify` and `gate` spawn are owned by the run that asked for them, so a stop during a repair pass reaches the repair too, and no further helper is started for a run that has been stopped. A run cancelled that way keeps that verdict and says why.
+- **Honest endings.** A run stopped at its turn cap comes back marked `[partial: stopped at the N-turn cap]` instead of reading like a finished answer, and it keeps the text the child wrote — the last message after a cap or an Esc mid-tool is usually just the tool call, so the report is taken from the last message that actually said something. A child that stopped cleanly and produced no text says exactly that — it used to be recorded as `done` with an empty result, which the report then rendered as *"still running"*, sending the parent to poll a run that had already ended.
 - **A broken definition is refused.** A `tools:` line where nothing resolves rejects the definition rather than quietly falling back to read-only: the author asked for a tool set and would otherwise get an agent nobody wrote.
 - **Isolated runs clean up after themselves.** With `isolation: "worktree"`, a worktree whose child changed nothing is removed along with its branch — the common case for a review or a search. Anything uncommitted, and any commit the child made, is kept and reported.
 - **Concurrent background writers share your checkout.** Without `isolation: "worktree"`, a background run works directly in the session's directory — and up to four run at once. Two that edit the same file will clobber each other, the same shared-tree hazard [`@pify/swarm`](https://github.com/pifydev/swarm) and [`@pify/workflow`](https://github.com/pifydev/workflow) warn about. Background read-only work (review, search) is safe to fan out; give any run that writes its own `isolation: "worktree"`, or keep writers foreground so they take turns.

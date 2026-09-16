@@ -33,7 +33,12 @@ export function sanitizeSlug(raw: string): string {
   return slug || "run";
 }
 
-export function createIsolationWorktree(cwd: string, rawSlug: string): Isolation {
+/** Where isolation worktrees live by default: ~/.worktrees. */
+export function defaultWorktreeRoot(): string {
+  return join(homedir(), ".worktrees");
+}
+
+export function createIsolationWorktree(cwd: string, rawSlug: string, root: string = defaultWorktreeRoot()): Isolation {
   let toplevel: string;
   try {
     toplevel = git(cwd, ["rev-parse", "--show-toplevel"]);
@@ -44,11 +49,11 @@ export function createIsolationWorktree(cwd: string, rawSlug: string): Isolation
   const slug = sanitizeSlug(rawSlug);
 
   let branch = `agent/${slug}`;
-  let path = join(homedir(), ".worktrees", repo, slug);
+  let path = join(root, repo, slug);
   let counter = 2;
   while (existsSync(path) || branchExists(cwd, branch)) {
     branch = `agent/${slug}-${counter}`;
-    path = join(homedir(), ".worktrees", repo, `${slug}-${counter}`);
+    path = join(root, repo, `${slug}-${counter}`);
     counter++;
     if (counter > 50) throw new Error("Could not find a free worktree slot.");
   }
@@ -71,13 +76,68 @@ function branchExists(cwd: string, branch: string): boolean {
   }
 }
 
-/** Note appended to a child's report when it ran isolated. */
+/**
+ * Note appended to a child's report when it ran isolated and left work
+ * behind. That work is UNCOMMITTED unless the child chose to commit — the
+ * builtin worker never does — and @pify/worktree's worktree_merge refuses a
+ * dirty tree, so the old note ("merge with worktree_merge") sent the model to
+ * a tool that would turn it away. Say what state the tree is in and what to
+ * do about it.
+ */
 export function isolationNote(isolation: Isolation): string {
+  const at = `git -C "${isolation.path}"`;
   return [
-    `Ran isolated in worktree ${isolation.path} (branch ${isolation.branch}).`,
-    `The main checkout is untouched. Merge with @pify/worktree's worktree_merge branch="${isolation.branch}",`,
-    `or inspect: cd "${isolation.path}" && git log --stat`,
+    `Ran isolated in worktree ${isolation.path} (branch ${isolation.branch}); the main checkout is untouched.`,
+    `Its changes are in that worktree, uncommitted unless the child committed them. To bring them back:`,
+    `  review:  ${at} status && ${at} diff`,
+    `  commit:  ${at} add -A && ${at} commit -m "<what changed>"`,
+    `  merge:   @pify/worktree's worktree_merge branch="${isolation.branch}" (refuses an uncommitted tree)`,
+    `or discard it: git worktree remove --force "${isolation.path}".`,
   ].join("\n");
+}
+
+/** Note when an isolated run changed nothing and its worktree was removed. */
+export const CLEAN_WORKTREE_NOTE =
+  "Ran isolated in a temporary worktree; it changed nothing, so the worktree was removed.";
+
+/**
+ * The fields the isolation epilogue writes onto a call record. Kept structural
+ * so isolate.ts stays free of any dependency on the extension's types — the
+ * run's AgentCallState satisfies it by shape.
+ */
+export interface IsolationSink {
+  worktree?: string;
+  branch?: string;
+}
+
+/**
+ * Close out an isolated child's worktree exactly once, whatever its outcome.
+ *
+ * This is the epilogue EVERY terminal path of a child call must reach —
+ * success, schema mismatch, gate failure, abort, or a thrown error. Before,
+ * only the prose success path ran it, so a `schema:` step (or any failure or
+ * abort) left its worktree and branch behind forever. It runs
+ * removeIfUnchanged — a read-only step's worktree is deleted, a step that did
+ * work is kept — and when the worktree is kept it records where the edits live
+ * on the call so a non-prose result (a schema object, a null from an error)
+ * can still name the location instead of orphaning it.
+ *
+ * Returns the human note for callers that render prose; callers on non-prose
+ * paths rely on the pointer written to `sink`. Never throws (removeIfUnchanged
+ * already swallows its own failures): the cleanup must not sink a run.
+ */
+export function settleWorktree(
+  cwd: string,
+  isolation: Isolation,
+  sink: IsolationSink,
+): { removed: boolean; note: string } {
+  const removed = removeIfUnchanged(cwd, isolation);
+  if (removed) return { removed: true, note: CLEAN_WORKTREE_NOTE };
+  // Kept: there is work to merge. Record the pointer so the location survives
+  // on the call record even when the returned value is data or null.
+  sink.worktree = isolation.path;
+  sink.branch = isolation.branch;
+  return { removed: false, note: isolationNote(isolation) };
 }
 
 /**

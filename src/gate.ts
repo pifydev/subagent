@@ -21,7 +21,7 @@
  * about having proved nothing either way.
  */
 
-import { spawnSync } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 
 export type GateOutcome =
   | "success"
@@ -203,60 +203,149 @@ export function contractProblems(contract: GateContract): string[] {
 export const GATE_TIMEOUT_MS = 120_000;
 
 /**
+ * Output kept from a gate. A real suite prints books; the verdict is at the
+ * end, so it is the tail that is kept when a gate prints past this.
+ */
+const GATE_MAX_OUTPUT = 16 * 1024 * 1024;
+
+/**
  * Run a gate and judge it against its contract, with the shell in the subject
  * working directory. A bare string keeps the exit-code meaning; a contract can
  * also say what success has to look like, which is what stops a command that
  * never ran the check from passing.
  *
+ * Asynchronous, and that is load-bearing. A gate is a test suite or a build,
+ * and the first version ran it with spawnSync — which held pi's whole event
+ * loop for the duration: nothing rendered, Esc could not be delivered, and
+ * every other child's provider stream sat unread until the gate returned,
+ * up to the full deadline. The deadline is enforced here (the shell is
+ * killed on timeout) and output is capped rather than erroring, so a
+ * chatty-but-passing gate still passes.
+ *
  * The command comes from the caller — the same trust level as the bash tool in
  * this session — so this adds no capability the caller did not already have.
  */
-export function runGate(gate: string | GateContract, cwd: string): GateVerdict & { output: string } {
+export function runGate(gate: string | GateContract, cwd: string): Promise<GateVerdict & { output: string }> {
   const contract = normalizeGate(gate);
   const problems = contractProblems(contract);
   if (problems.length > 0) {
     // A gate that cannot be run is not a verdict on the work. Calling this a
     // failure would report a typo in the gate as a defect in the code.
-    return { outcome: "no_attestation", ok: false, reason: problems.join("; "), output: "" };
+    return Promise.resolve({ outcome: "no_attestation", ok: false, reason: problems.join("; "), output: "" });
   }
   const timeoutMs = contract.timeoutMs ?? GATE_TIMEOUT_MS;
-  try {
-    const result = spawnSync(contract.command, {
-      shell: true,
-      cwd,
-      encoding: "utf8",
-      timeout: timeoutMs,
-      windowsHide: true,
-      // A real test suite or build easily prints past spawnSync's 1 MiB
-      // default; overflow surfaces as an ENOBUFS `error`, which this code
-      // would otherwise read as spawnError → no_attestation, rejecting work
-      // that in fact passed. Give the gate room to actually report.
-      maxBuffer: 16 * 1024 * 1024,
-    });
-    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim();
-    const verdict = evaluateGate(
-      { ...contract, timeoutMs },
-      {
-        status: result.status,
-        signal: result.signal,
-        output,
-        timedOut: result.error?.message?.includes("ETIMEDOUT") || result.signal === "SIGTERM",
-        // spawnSync reports a failure to start in `error` rather than by
-        // throwing, and a timeout arrives the same way — so the timeout has to
-        // be ruled out first or every deadline would read as "never ran".
-        spawnError:
-          result.error && !result.error.message?.includes("ETIMEDOUT")
-            ? result.error.message
-            : undefined,
-      },
-    );
-    return { ...verdict, output };
-  } catch (err) {
-    return {
-      outcome: "no_attestation",
-      ok: false,
-      reason: `gate could not be started: ${err instanceof Error ? err.message : String(err)}`,
-      output: "",
+
+  return new Promise((resolve) => {
+    let child: ChildProcess;
+    try {
+      child = spawn(contract.command, {
+        shell: true,
+        cwd,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        // POSIX: lead a process group, so a timeout can kill the whole tree
+        // and not just the shell that started it.
+        detached: process.platform !== "win32",
+      });
+    } catch (err) {
+      resolve({
+        outcome: "no_attestation",
+        ok: false,
+        reason: `gate could not be started: ${err instanceof Error ? err.message : String(err)}`,
+        output: "",
+      });
+      return;
+    }
+
+    // stdout and stderr in arrival order — how a person would have read the
+    // terminal — trimmed from the front once past the cap.
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const keep = (chunk: Buffer): void => {
+      chunks.push(chunk);
+      size += chunk.length;
+      while (size > GATE_MAX_OUTPUT && chunks.length > 1) size -= chunks.shift()!.length;
     };
+    child.stdout?.on("data", keep);
+    child.stderr?.on("data", keep);
+
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killTree(child);
+    }, timeoutMs);
+
+    let settled = false;
+    let exited: { status: number | null; signal: string | null } | null = null;
+    const finish = (spawnError?: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const output = Buffer.concat(chunks).toString("utf8").trim();
+      resolve({
+        ...evaluateGate(
+          { ...contract, timeoutMs },
+          { status: exited?.status ?? null, signal: exited?.signal ?? null, output, timedOut, spawnError },
+        ),
+        output,
+      });
+    };
+    // A failure to start arrives as an event, not a throw. After a timeout
+    // kill, an error is the kill's doing, not a spawn failure.
+    child.on("error", (err) => {
+      exited ??= { status: null, signal: null };
+      finish(timedOut ? undefined : err.message);
+    });
+    // `close` waits for the pipes, which a grandchild that outlived the shell
+    // can hold open indefinitely; `exit` is the shell's own verdict. Wait for
+    // the pipes briefly so a normal exit keeps all of its output, then finish
+    // regardless — a gate must never hang a run past its deadline.
+    child.on("close", (status, signal) => {
+      exited ??= { status, signal };
+      finish();
+    });
+    child.on("exit", (status, signal) => {
+      exited = { status, signal };
+      const grace = setTimeout(() => finish(), EXIT_DRAIN_MS);
+      grace.unref?.();
+    });
+  });
+}
+
+/** How long to wait for a gate's pipes after its shell has exited. */
+const EXIT_DRAIN_MS = 500;
+
+/**
+ * Kill a gate's whole process tree. The shell alone dying leaves the test
+ * suite it started running — on Windows `child.kill()` reaches only cmd.exe,
+ * and on POSIX only the shell — so a deadline that merely killed the shell
+ * would report a timeout while the suite ran on, holding the pipes open.
+ */
+function killTree(child: ChildProcess): void {
+  const pid = child.pid;
+  if (pid === undefined) return;
+  if (process.platform === "win32") {
+    // By absolute path: PATH is the user's, and a gate has run under odd ones.
+    const taskkill = `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\taskkill.exe`;
+    try {
+      spawn(taskkill, ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" }).on("error", () => {});
+    } catch {
+      // taskkill unavailable: the plain kill below is all that is left
+    }
+    try {
+      child.kill();
+    } catch {
+      // already gone
+    }
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // already gone
+    }
   }
 }

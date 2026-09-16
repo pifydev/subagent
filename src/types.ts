@@ -91,6 +91,14 @@ export interface RunState {
    * verdicts unattributable.
    */
   workDir?: string;
+  /**
+   * The child has finished but verify/gate is still running on its work, so
+   * the status is "done" and the caller has not been handed anything yet.
+   * Set by the extension, cleared when the outcome settles; never persisted.
+   * Not the same as a missing outcome: helper runs and runs restored on
+   * session_start never settle at all.
+   */
+  settling?: boolean;
   /** Set once the run settles: what the task came to, apart from whether the session finished. */
   outcome?: TaskOutcome;
   /** How well that outcome is known. "not-requested" when no gate ran. */

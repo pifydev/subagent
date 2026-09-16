@@ -48,7 +48,9 @@ import {
 } from "../src/ask.ts";
 import { buildMentionMessage, findMentions } from "../src/mentions.ts";
 import { LiveChildren, cancelNote, type CancelReason } from "../src/cancel.ts";
+import { registerOwned } from "../src/owned.ts";
 import { DELIVERY_TYPE, deliveryMessage, pendingResult } from "../src/pending.ts";
+import { waitUntil } from "../src/wait.ts";
 import {
   consentQuestion,
   decideConsent,
@@ -62,19 +64,19 @@ import { buildTaskPrompt, childFraming, describeDefs, formatRunResult } from "..
 import { runVerification } from "../src/verify.ts";
 import { normalizeGate, runGate, sharedWith, type GateContract, type GateSibling } from "../src/gate.ts";
 import { runGateCycle } from "../src/repair.ts";
+import { repairAllowed } from "../src/policy.ts";
 import { deriveOutcome, parseDeclaredOutcome, stripDeclaration } from "../src/outcome.ts";
+import { extractReport, markReport, type ReportMessage } from "../src/report.ts";
+import { RESULT_ENTRY, persistable, replayRuns } from "../src/persist.ts";
 import { mintRunId, seedCounters } from "../src/ids.ts";
-import { buildWidgetLines } from "../src/widget.ts";
-import {
-  MAX_CONCURRENT_BACKGROUND,
-  isRecord,
-  type AgentDef,
-  type RunState,
-  type RunStatus,
-} from "../src/types.ts";
+import { buildWidgetLines, isVisible } from "../src/widget.ts";
+import { MAX_CONCURRENT_BACKGROUND, type AgentDef, type RunState, type RunStatus } from "../src/types.ts";
 
-const RESULT_ENTRY = "subagent-result";
 const MENTION_ENTRY = "subagent-mention";
+/** Longest agent_result may block waiting for a run, in seconds. */
+const MAX_WAIT_SECONDS = 120;
+/** How often a waiting agent_result looks at the run. */
+const WAIT_POLL_MS = 250;
 const CLEAN_WORKTREE_NOTE =
   "Ran isolated in a temporary worktree; it changed nothing, so the worktree and its branch were removed.";
 
@@ -112,9 +114,7 @@ export default function subagent(pi: ExtensionAPI) {
     if (!ctx || !ctx.hasUI) return;
     lastUiCtx = ctx;
     const now = Date.now();
-    const anyVisible = [...runs.values()].some(
-      (r) => r.status === "running" || (r.finishedAt ?? 0) > now - 15_000,
-    );
+    const anyVisible = [...runs.values()].some((r) => isVisible(r, now));
     if (!anyVisible) {
       ctx.ui.setWidget("subagent", undefined);
       return;
@@ -185,10 +185,29 @@ export default function subagent(pi: ExtensionAPI) {
     return approved;
   }
 
-  async function runChild(ctx: UiContext, def: AgentDef, run: RunState, workDir?: string): Promise<void> {
+  /**
+   * How a child is filed and recorded. `owner` is the run whose cancel must
+   * reach this child — a verify or gate helper names its parent, a top-level
+   * run names itself. `persist` writes the record to the session as soon as
+   * the child ends; a top-level run leaves that to runIt, which writes it once
+   * after verify, gate and the outcome have had their say.
+   */
+  interface ChildOptions {
+    owner?: string;
+    persist?: boolean;
+  }
+
+  async function runChild(
+    ctx: UiContext,
+    def: AgentDef,
+    run: RunState,
+    workDir?: string,
+    options: ChildOptions = {},
+  ): Promise<void> {
     // Nothing to start if the user already stopped this run while it queued
     // behind the concurrency cap.
     if (run.status === "aborted") return;
+    const owner = options.owner ?? run.id;
     let session: AgentSession | null = null;
     let unsubscribe: (() => void) | null = null;
     let releaseLive: (() => void) | null = null;
@@ -286,7 +305,9 @@ export default function subagent(pi: ExtensionAPI) {
         resourceLoader: loader,
       });
       session = created.session;
-      releaseLive = live.register(run.id, session);
+      // Under its own id and its owner's: Esc on the parent stops the helper
+      // it is waiting on, and the helper can still be stopped by name.
+      releaseLive = registerOwned(live, run.id, owner, session);
       // Addressable for agent_steer while it runs; removed in the finally.
       steerable.set(run.id, session);
 
@@ -331,30 +352,17 @@ export default function subagent(pi: ExtensionAPI) {
 
       await session.prompt(buildTaskPrompt(run.task), { source: "extension" } as never);
 
-      const messages = session.messages as Array<{
-        role?: string;
-        stopReason?: unknown;
-        content?: Array<{ type?: string; text?: string }>;
-      }>;
-      const last = [...messages].reverse().find((m) => m.role === "assistant");
-      const text = (last?.content ?? [])
-        .filter((c) => c.type === "text" && typeof c.text === "string")
-        .map((c) => c.text)
-        .join("\n")
-        .trim();
+      // The report is the last thing the child SAID, not the last message it
+      // sent: after a turn-cap abort or an Esc mid-tool that message is often
+      // text-free, and the account it wrote a turn earlier is the one to keep.
+      const { text, stopReason } = extractReport(session.messages as ReportMessage[]);
 
       // A run stopped at its turn cap is not a finished answer. Returning it
       // unmarked reads as complete to whoever asked for it. A run the loop
       // guard stopped is the same: mark it, with the reason, so the parent
       // knows the child gave up rather than concluded.
-      const cappedAtTurnLimit = run.turns >= def.maxTurns && last?.stopReason === "aborted";
-      run.result = stallReason
-        ? `${text ? `${text}\n\n` : ""}[stopped: no progress — the child ${stallReason}]`
-        : cappedAtTurnLimit && text
-          ? `${text}
-
-[partial: stopped at the ${def.maxTurns}-turn cap for agent "${def.name}" — this answer may be unfinished]`
-          : text || null;
+      const cappedAtTurnLimit = run.turns >= def.maxTurns && stopReason === "aborted";
+      run.result = markReport(text, { stallReason, cappedAtTurnLimit, maxTurns: def.maxTurns, agent: def.name });
       // A run the user (or session teardown) already cancelled keeps that
       // verdict and its explanation — the child stopping is the consequence,
       // not a separate outcome.
@@ -362,8 +370,7 @@ export default function subagent(pi: ExtensionAPI) {
       // this function, but cancelRun can flip it while we were awaiting.
       const cancelled = (run.status as RunStatus) === "aborted" && run.error !== null;
       if (!cancelled) {
-        run.status =
-          last?.stopReason === "aborted" ? "aborted" : last?.stopReason === "error" ? "error" : "done";
+        run.status = stopReason === "aborted" ? "aborted" : stopReason === "error" ? "error" : "done";
       }
       // A child that stopped cleanly and said nothing has not answered. It
       // used to be recorded as done with a null result, which formatRunResult
@@ -395,15 +402,23 @@ export default function subagent(pi: ExtensionAPI) {
           // double-dispose fine
         }
       }
-      try {
-        pi.appendEntry(RESULT_ENTRY, run);
-      } catch {
-        // A /reload or session switch while this child ran invalidates the
-        // captured pi handle ("ctx is stale"); the run's result then cannot
-        // be persisted, but throwing here would turn a finished child into an
-        // unhandled rejection that takes the whole process down.
-      }
+      // A helper's record is final here. A top-level run's is not — verify,
+      // gate and the outcome still have to write into it — so runIt persists
+      // that one, once, at the end.
+      if (options.persist) persistRun(run);
       renderWidget();
+    }
+  }
+
+  /** Append the run to the session so agent_result still finds it after /reload. */
+  function persistRun(run: RunState): void {
+    try {
+      pi.appendEntry(RESULT_ENTRY, persistable(run));
+    } catch {
+      // A /reload or session switch while this child ran invalidates the
+      // captured pi handle ("ctx is stale"); the run's result then cannot
+      // be persisted, but throwing here would turn a finished child into an
+      // unhandled rejection that takes the whole process down.
     }
   }
 
@@ -443,13 +458,27 @@ export default function subagent(pi: ExtensionAPI) {
         runs.set(r.id, r);
         renderWidget(ctx);
       },
-      runChild: (def, r, wd) => runChild(ctx, def, r, wd),
+      runChild: (def, r, wd) => runHelper(ctx, run, def, r, wd),
     });
   }
 
-  /** An agent that can write is one that can fix what a gate complained about. */
-  const canWrite = (def: AgentDef) =>
-    def.tools.some((t) => t === "edit" || t === "write" || t === "bash" || t === "powershell");
+  /**
+   * Spawn a verify/gate helper on the parent's behalf: owned by the parent so
+   * Esc reaches it, persisted on its own since nothing settles it later. A
+   * parent cancelled between phases — the user pressed Esc while the reviewer
+   * was thinking — is no longer "done", and a helper started for it would be
+   * a child nobody is waiting for.
+   */
+  async function runHelper(ctx: UiContext, parent: RunState, def: AgentDef, helper: RunState, workDir?: string): Promise<void> {
+    if (parent.status !== "done") {
+      helper.status = "aborted";
+      helper.finishedAt = Date.now();
+      helper.error = `Not started: ${parent.id} was stopped before this pass began.`;
+      renderWidget(ctx);
+      return;
+    }
+    await runChild(ctx, def, helper, workDir, { owner: parent.id, persist: true });
+  }
 
   /**
    * Run the caller's gate in the tree the child worked in and, if it failed,
@@ -463,23 +492,27 @@ export default function subagent(pi: ExtensionAPI) {
     def: AgentDef,
     contract: GateContract,
     attempts: number,
+    canRepair: boolean,
   ): Promise<void> {
     const subject = run.workDir ?? ctx.cwd;
-    const self: GateSibling = { id: 0, label: run.id, status: run.status, workDir: run.workDir };
+    // A run without a workDir works in the session's cwd, and sharedWith reads
+    // an undefined workDir as "wherever the subject is" — which blamed every
+    // running non-isolated sibling for an isolated run's worktree.
+    const self: GateSibling = { id: 0, label: run.id, status: run.status, workDir: run.workDir ?? ctx.cwd };
     const siblings: GateSibling[] = [...runs.values()]
       .filter((r) => r.id !== run.id)
-      .map((r, i) => ({ id: i + 1, label: r.id, status: r.status, workDir: r.workDir }));
+      .map((r, i) => ({ id: i + 1, label: r.id, status: r.status, workDir: r.workDir ?? ctx.cwd }));
 
     const { record, verification } = await runGateCycle(run.task, contract, subject, {
       runGate,
-      canRepair: canWrite(def),
+      canRepair,
       maxAttempts: attempts,
       sharedWith: sharedWith(self, subject, siblings),
       repair: async (prompt) => {
         const fix = mkRun(nextId(def.name), def.name, prompt);
         runs.set(fix.id, fix);
         renderWidget(ctx);
-        await runChild(ctx, def, fix, run.workDir);
+        await runHelper(ctx, run, def, fix, run.workDir);
         // The repair's own report replaces the stale one: the caller must not
         // be handed a description of a tree that has since changed.
         if (fix.status === "done" && fix.result?.trim()) run.result = fix.result;
@@ -495,10 +528,17 @@ export default function subagent(pi: ExtensionAPI) {
    * on a run that never had a gate.
    */
   function settleOutcome(run: RunState): void {
+    if (run.status === "running") return;
+    // Whatever was still deciding the outcome has now decided it: the run is
+    // finished from here, and the widget's clock stops here too.
+    if (run.settling) {
+      delete run.settling;
+      run.finishedAt = Date.now();
+    }
     // Settled once and for good: re-running it after the isolation note has
     // been appended would find the declaration already stripped and quietly
     // promote a blocked run to a successful one.
-    if (run.status === "running" || run.outcome) return;
+    if (run.outcome) return;
     const declared = parseDeclaredOutcome(run.result);
     if (declared && run.result) run.result = stripDeclaration(run.result);
     run.verification ??= "not-requested";
@@ -510,14 +550,18 @@ export default function subagent(pi: ExtensionAPI) {
    * abort and session teardown — come through here; marking the record
    * without aborting the child left it talking to the provider on the user's
    * money, writing into a conversation nobody would read.
+   *
+   * A settling run is stopped the same way: its own child has finished, but
+   * the helpers verifying its work are live under its id, and a stop that
+   * left them running would be the same bug one phase later.
    */
   function cancelRun(run: RunState, reason: CancelReason): void {
     const stopped = live.abortRun(run.id);
-    if (run.status === "running") {
+    if (run.status === "running" || run.settling) {
       run.status = "aborted";
-      run.finishedAt = Date.now();
       run.error = cancelNote(reason, stopped);
       settleOutcome(run);
+      run.finishedAt = Date.now();
     }
     renderWidget();
   }
@@ -651,53 +695,68 @@ export default function subagent(pi: ExtensionAPI) {
       }
 
       const runIt = async () => {
-        await acquireSlot();
         try {
-          await runChild(uiCtx, def, run, isolation?.path);
+          await acquireSlot();
+          try {
+            await runChild(uiCtx, def, run, isolation?.path);
+          } finally {
+            releaseSlot();
+          }
+          // The child is done; the run is not, if a check was asked for. Until
+          // it settles, agent_result and the widget say "verifying" rather than
+          // handing out a result the gate may be about to contradict.
+          if ((params.verify || gate) && run.status === "done") run.settling = true;
+          // Opt-in auto peer-review, before the worktree is cleaned so a revision
+          // can still write into it. Best-effort; never fails the run.
+          if (params.verify && run.status === "done" && run.result?.trim()) {
+            try {
+              await verifyRun(uiCtx, run, def, isolation?.path);
+            } catch {
+              // verification is a convenience; the worker's result already stands
+            }
+          }
+          // The gate runs last and inside the worktree, so it judges the tree the
+          // caller will actually merge — after any revision, before cleanup.
+          if (gate && run.status === "done") {
+            // Read now, while the declaration is still in the report: a child
+            // that said it was blocked is not sent on repair passes, but the
+            // gate still runs once so the record says what the tree proves.
+            const canRepair = repairAllowed(def, run.result);
+            try {
+              await gateRun(uiCtx, run, def, gate, params.gateRepairs ?? 1, canRepair);
+            } catch (err) {
+              // A gate that throws proved nothing; say so rather than losing the
+              // child's work to an error in the checking machinery.
+              run.gate = {
+                command: gate.command,
+                outcome: "no_attestation",
+                ok: false,
+                reason: `gate could not be run: ${err instanceof Error ? err.message : String(err)}`,
+              };
+              run.verification = "inconclusive";
+            }
+          }
+          settleOutcome(run);
+          if (isolation) {
+            // A worktree the child left untouched is removed with its branch —
+            // the common case for a review or a search, and the cleanup all
+            // three READMEs promise but none performed: removeIfUnchanged was
+            // imported and never called, so every isolated run leaked a
+            // directory and an agent/<slug> branch under ~/.worktrees forever.
+            // Anything changed or committed is kept, and only then does the
+            // merge note make sense.
+            const removed = removeIfUnchanged(uiCtx.cwd, isolation);
+            if (!removed && run.result !== null) {
+              run.result = `${run.result}\n\n${isolationNote(isolation)}`;
+            } else if (removed && run.result !== null) {
+              run.result = `${run.result}\n\n${CLEAN_WORKTREE_NOTE}`;
+            }
+          }
         } finally {
-          releaseSlot();
-        }
-        // Opt-in auto peer-review, before the worktree is cleaned so a revision
-        // can still write into it. Best-effort; never fails the run.
-        if (params.verify && run.status === "done" && run.result?.trim()) {
-          try {
-            await verifyRun(uiCtx, run, def, isolation?.path);
-          } catch {
-            // verification is a convenience; the worker's result already stands
-          }
-        }
-        // The gate runs last and inside the worktree, so it judges the tree the
-        // caller will actually merge — after any revision, before cleanup.
-        if (gate && run.status === "done") {
-          try {
-            await gateRun(uiCtx, run, def, gate, params.gateRepairs ?? 1);
-          } catch (err) {
-            // A gate that throws proved nothing; say so rather than losing the
-            // child's work to an error in the checking machinery.
-            run.gate = {
-              command: gate.command,
-              outcome: "no_attestation",
-              ok: false,
-              reason: `gate could not be run: ${err instanceof Error ? err.message : String(err)}`,
-            };
-            run.verification = "inconclusive";
-          }
-        }
-        settleOutcome(run);
-        if (isolation) {
-          // A worktree the child left untouched is removed with its branch —
-          // the common case for a review or a search, and the cleanup all
-          // three READMEs promise but none performed: removeIfUnchanged was
-          // imported and never called, so every isolated run leaked a
-          // directory and an agent/<slug> branch under ~/.worktrees forever.
-          // Anything changed or committed is kept, and only then does the
-          // merge note make sense.
-          const removed = removeIfUnchanged(uiCtx.cwd, isolation);
-          if (!removed && run.result !== null) {
-            run.result = `${run.result}\n\n${isolationNote(isolation)}`;
-          } else if (removed && run.result !== null) {
-            run.result = `${run.result}\n\n${CLEAN_WORKTREE_NOTE}`;
-          }
+          // Once, and last: the record that survives /reload is the settled
+          // one, gate and outcome included. In a finally so a cleanup that
+          // throws still leaves the run findable afterwards.
+          persistRun(run);
         }
       };
 
@@ -755,26 +814,46 @@ export default function subagent(pi: ExtensionAPI) {
     name: "agent_result",
     label: "Subagent result",
     promptSnippet: "Collect the report from a background child agent",
-    description: "Fetch the report of a background subagent by id (from agent_run).",
+    description:
+      "Fetch the report of a background subagent by id (from agent_run). A run whose verify or gate is still " +
+      "deciding is reported as not ready, not as done. Set wait (seconds, up to 120) to block up to that long " +
+      "for it before answering — useful headless, where nothing is delivered after your turn ends.",
     parameters: Type.Object({
       id: Type.String({ description: "Run id, e.g. reviewer-1" }),
+      wait: Type.Optional(
+        Type.Number({ description: "Seconds to wait for the run to finish before answering, 0-120 (default 0)" }),
+      ),
     }),
-    async execute(_id, params: { id: string }, _signal, _onUpdate, ctx) {
+    async execute(_id, params: { id: string; wait?: number }, signal, _onUpdate, ctx) {
       const run = runs.get(params.id.trim());
       if (!run) {
         const known = [...runs.keys()].sort().join(", ") || "(none this session)";
         throw new Error(`No run "${params.id}". Known runs: ${known}`);
       }
-      if (run.status === "running") {
+      const ready = () => run.status !== "running" && !run.settling;
+      const waitMs = Math.max(0, Math.min(MAX_WAIT_SECONDS, Number(params.wait) || 0)) * 1000;
+      // The tool's own signal stops the wait: Esc must not sit out the budget.
+      await waitUntil(ready, waitMs, WAIT_POLL_MS, signal);
+      if (!ready()) {
+        const interactive = (ctx as { hasUI?: boolean }).hasUI !== false;
         const pending = pendingResult({
           id: run.id,
           kind: "running",
           startedAt: run.startedAt,
           now: Date.now(),
           collectWith: "agent_result",
-          interactive: (ctx as { hasUI?: boolean }).hasUI !== false,
+          interactive,
         });
-        return { content: [{ type: "text", text: pending.text }], details: pending.details as never };
+        // A settling run has a result the caller must not see yet: the gate
+        // may be about to contradict it, and a repair pass may replace it.
+        const text = [
+          pending.text,
+          ...(run.settling
+            ? ["", `${run.id} has finished its work and is being verified; the report lands once that settles.`]
+            : []),
+          ...(interactive ? [] : ["", `Or call again with wait: 30 to block up to 30 seconds for it.`]),
+        ].join("\n");
+        return { content: [{ type: "text", text }], details: pending.details as never };
       }
       return {
         content: [{ type: "text", text: formatRunResult(run) }],
@@ -862,12 +941,7 @@ export default function subagent(pi: ExtensionAPI) {
     // Completed runs from earlier in this session's branch are replayable so
     // agent_result keeps working after /reload. Running ones did not survive.
     runs.clear();
-    for (const entry of ctx.sessionManager.getBranch()) {
-      const e = entry as { type?: string; customType?: string; data?: unknown };
-      if (e.type !== "custom" || e.customType !== RESULT_ENTRY || !isRecord(e.data)) continue;
-      const data = e.data as unknown as RunState;
-      if (typeof data.id === "string" && data.status !== "running") runs.set(data.id, data);
-    }
+    for (const restored of replayRuns(ctx.sessionManager.getBranch())) runs.set(restored.id, restored);
     // The id counter is memory-only and starts empty on a fresh load; re-seed it
     // past the replayed ids so the first new run does not mint "reviewer-1"/
     // "agent-1" again and overwrite a live entry via runs.set().
@@ -876,9 +950,10 @@ export default function subagent(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
-    // A child cannot outlive the session that asked for it.
+    // A child cannot outlive the session that asked for it — nor can the
+    // helpers still verifying a child that has.
     for (const run of runs.values()) {
-      if (run.status === "running") cancelRun(run, "session-switch");
+      if (run.status === "running" || run.settling) cancelRun(run, "session-switch");
     }
     if (ctx.hasUI) ctx.ui.setWidget("subagent", undefined);
   });
@@ -891,7 +966,7 @@ export default function subagent(pi: ExtensionAPI) {
       if (!ctx.hasUI) return;
       const runLines =
         [...runs.values()]
-          .map((r) => `${r.id}: ${r.status} (${r.turns} turns, ${r.tokens} tok)`)
+          .map((r) => `${r.id}: ${r.settling ? "verifying" : r.status} (${r.turns} turns, ${r.tokens} tok)`)
           .join("\n") || "(no runs yet)";
       ctx.ui.notify(
         `Agent types\n${describeDefs([...defs.values()])}\n\nRuns\n${runLines}\n\nCustom types: .pi/agents/<name>.md`,

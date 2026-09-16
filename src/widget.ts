@@ -10,17 +10,27 @@ function tokens(n: number): string {
 }
 
 function elapsed(run: RunState, now: number): string {
-  const s = Math.max(0, Math.round(((run.finishedAt ?? now) - run.startedAt) / 1000));
+  // A settling run's child has finished, but the run has not: its clock keeps
+  // going through the verify/gate that is still deciding what it came to.
+  const end = run.settling ? now : (run.finishedAt ?? now);
+  const s = Math.max(0, Math.round((end - run.startedAt) / 1000));
   if (s >= 60) return `${Math.floor(s / 60)}m ${s % 60}s`;
   return `${s}s`;
+}
+
+/** A run the widget should show: live, settling, or finished within the window. */
+export function isVisible(run: RunState, now: number): boolean {
+  return run.status === "running" || run.settling === true || (run.finishedAt ?? 0) > now - 15_000;
 }
 
 /**
  * The row reports the *task*, not the session. A child that ran to the end and
  * failed its gate used to sit in the widget as a green ✓, which is precisely
- * the confusion the outcome field exists to remove.
+ * the confusion the outcome field exists to remove — and a run whose gate is
+ * still running is not a ✓ either, yet.
  */
 function icon(run: RunState): string {
+  if (run.settling) return "⟳";
   switch (run.status) {
     case "running":
       return "⟳";
@@ -36,7 +46,7 @@ function icon(run: RunState): string {
 type Tone = "warning" | "success" | "error";
 
 function tone(run: RunState): Tone {
-  if (run.status === "running") return "warning";
+  if (run.status === "running" || run.settling) return "warning";
   if (run.status !== "done") return "error";
   if (run.outcome === "failed") return "error";
   if (run.outcome === "blocked") return "warning";
@@ -48,7 +58,7 @@ function tone(run: RunState): Tone {
  * Empty when there is nothing to show.
  */
 export function buildWidgetLines(runs: RunState[], theme: ThemeLike, now: number): string[] {
-  const visible = runs.filter((r) => r.status === "running" || (r.finishedAt ?? 0) > now - 15_000);
+  const visible = runs.filter((r) => isVisible(r, now));
   if (visible.length === 0) return [];
 
   const dim = (s: string) => theme.fg("dim", s);
@@ -62,7 +72,7 @@ export function buildWidgetLines(runs: RunState[], theme: ThemeLike, now: number
     const color = tone(run);
     const paint = (s: string) => theme.fg(color, s);
     const head = paint(`${icon(run)} ${clampWidth(run.id, 16)}`);
-    const stats = dim(` · ${tokens(run.tokens)} tok · ${elapsed(run, now)}`);
+    const stats = dim(` · ${tokens(run.tokens)} tok · ${elapsed(run, now)}${run.settling ? " · verifying" : ""}`);
     return `${dim("│ ")}${head}${stats} ${dim(clampWidth(run.task, 30))}`;
   });
   for (const row of clampRows(rows, MAX_WIDGET_ROWS, (hidden) => dim(`│ … +${hidden} more`))) {

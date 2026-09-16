@@ -156,6 +156,23 @@ test("widget shows running and recently finished, hides stale", () => {
   assert.ok(text.includes("1.5k tok"));
 });
 
+test("widget shows a settling run as verifying, with the clock still ticking", () => {
+  // Between the child finishing and its verify/gate settling, the run's status
+  // is "done" — but the caller has not been handed anything yet. Reporting it
+  // as ✓ for the length of a test suite was a lie the widget told first.
+  const now = 100_000;
+  const settling = run({ id: "worker-1", status: "done", finishedAt: now - 40_000, startedAt: now - 70_000, settling: true, result: "ok" });
+  const text = buildWidgetLines([settling], theme, now).join("\n");
+  assert.ok(text.includes("⟳ worker-1"), text);
+  assert.ok(text.includes("verifying"), text);
+  assert.ok(text.includes("1m 10s"), "elapsed runs to now, not to the child's own finish");
+  assert.ok(!text.includes("✓"), text);
+
+  // finishedAt is outside the 15s window, but a settling run is never stale.
+  const old = run({ id: "worker-2", status: "done", finishedAt: now - 60_000, settling: true, result: "ok" });
+  assert.ok(buildWidgetLines([old], theme, now).join("\n").includes("worker-2"));
+});
+
 test("widget renders nothing when idle", () => {
   assert.deepEqual(buildWidgetLines([run({ status: "done", finishedAt: 1 })], theme, 100_000), []);
 });

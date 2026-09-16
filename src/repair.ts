@@ -47,8 +47,8 @@ export function repairPrompt(
 }
 
 export interface GateCycleDeps {
-  /** Run the gate in `cwd` and judge it (src/gate.ts runGate). */
-  runGate(contract: GateContract, cwd: string): GateVerdict & { output: string };
+  /** Run the gate in `cwd` and judge it (src/gate.ts runGate); a stub may answer synchronously. */
+  runGate(contract: GateContract, cwd: string): (GateVerdict & { output: string }) | Promise<GateVerdict & { output: string }>;
   /** Send the child back with a repair brief; resolves when that pass settles. */
   repair(prompt: string): Promise<void>;
   /**
@@ -79,14 +79,14 @@ export async function runGateCycle(
   cwd: string,
   deps: GateCycleDeps,
 ): Promise<{ record: GateRecord; verification: Verification }> {
-  let verdict = deps.runGate(contract, cwd);
+  let verdict = await deps.runGate(contract, cwd);
   let repairs = 0;
   const limit = Math.max(0, Math.min(5, deps.maxAttempts));
 
   while (!verdict.ok && deps.canRepair && repairs < limit && repairable(verdict.outcome)) {
     await deps.repair(repairPrompt(task, contract, verdict));
     repairs++;
-    verdict = deps.runGate(contract, cwd);
+    verdict = await deps.runGate(contract, cwd);
   }
 
   const record: GateRecord = {

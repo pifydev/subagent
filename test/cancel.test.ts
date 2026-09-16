@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { LiveChildren, cancelNote } from "../src/cancel.ts";
+import { registerOwned } from "../src/owned.ts";
 
 const child = () => {
   const state = { aborts: 0 };
@@ -68,6 +69,43 @@ test("abortAll clears every run", () => {
   assert.equal(live.abortAll(), 2);
   assert.equal(live.total(), 0);
   assert.equal(live.abortAll(), 0);
+});
+
+test("a helper registered under its own id and its owner's stops on either", () => {
+  // The bug: verify/gate helpers (reviewer-N, worker-N) were registered under
+  // their own fresh ids only, so Esc on the parent never reached them.
+  const live = new LiveChildren();
+  const helper = child();
+  live.register("reviewer-2", helper.handle);
+  live.register("worker-1", helper.handle);
+  assert.equal(live.count("worker-1"), 1);
+
+  assert.equal(live.abortRun("worker-1"), 1, "aborting the owner reaches the helper");
+  assert.equal(helper.state.aborts, 1);
+
+  const direct = child();
+  live.register("reviewer-3", direct.handle);
+  live.register("worker-1", direct.handle);
+  assert.equal(live.abortRun("reviewer-3"), 1, "aborting the helper directly still works");
+  assert.equal(direct.state.aborts, 1);
+});
+
+test("registerOwned files a child under both ids and one release clears both", () => {
+  const live = new LiveChildren();
+  const helper = child();
+  const release = registerOwned(live, "reviewer-2", "worker-1", helper.handle);
+  assert.equal(live.count("reviewer-2"), 1);
+  assert.equal(live.count("worker-1"), 1);
+  release();
+  assert.equal(live.total(), 0, "a helper that finished leaves no trace under either id");
+  assert.equal(live.abortRun("worker-1"), 0);
+  assert.equal(helper.state.aborts, 0);
+
+  // A top-level run owns itself: one registration, not two.
+  const top = child();
+  registerOwned(live, "worker-1", "worker-1", top.handle);
+  assert.equal(live.count("worker-1"), 1);
+  assert.equal(live.total(), 1);
 });
 
 test("the note says who stopped it and what it cost", () => {
