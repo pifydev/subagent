@@ -477,6 +477,10 @@ export default function subagent(pi: ExtensionAPI) {
       renderWidget(ctx);
       return;
     }
+    // The helper works where its parent did. Recorded so a sibling's gate can
+    // tell whether this pass was in its directory — a repair inside a worktree
+    // is not sharing the main checkout, and vice versa.
+    if (workDir && !helper.workDir) helper.workDir = workDir;
     await runChild(ctx, def, helper, workDir, { owner: parent.id, persist: true });
   }
 
