@@ -3,6 +3,9 @@
  * No imports from pi packages: src/ typechecks and runs standalone.
  */
 
+import type { GateOutcome } from "./gate.ts";
+import type { TaskOutcome, Verification } from "./outcome.ts";
+
 export const VALID_TOOLS = [
   "read",
   "bash",
@@ -54,6 +57,21 @@ export const MAX_CONCURRENT_BACKGROUND = 4;
 
 export type RunStatus = "running" | "done" | "error" | "aborted";
 
+/** What a gate proved about one run, kept alongside the run it judged. */
+export interface GateRecord {
+  command: string;
+  outcome: GateOutcome;
+  ok: boolean;
+  /** One line in this package's words. */
+  reason: string;
+  /** Trimmed output, kept only when the gate did not pass. */
+  output?: string;
+  /** Other runs that were live in the same directory while it ran. */
+  sharedWith?: string[];
+  /** Repair passes spent trying to make it pass. */
+  repairs?: number;
+}
+
 export interface RunState {
   id: string;
   agent: string;
@@ -66,6 +84,18 @@ export interface RunState {
   turns: number;
   result: string | null;
   error: string | null;
+  /**
+   * The directory the child worked in — its worktree when isolated, otherwise
+   * undefined for the session's own cwd. A gate has to run where the work
+   * happened, and concurrent runs sharing one directory make each other's
+   * verdicts unattributable.
+   */
+  workDir?: string;
+  /** Set once the run settles: what the task came to, apart from whether the session finished. */
+  outcome?: TaskOutcome;
+  /** How well that outcome is known. "not-requested" when no gate ran. */
+  verification?: Verification;
+  gate?: GateRecord;
 }
 
 export interface ThemeLike {

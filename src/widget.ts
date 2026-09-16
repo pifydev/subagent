@@ -15,17 +15,32 @@ function elapsed(run: RunState, now: number): string {
   return `${s}s`;
 }
 
-function icon(status: RunState["status"]): string {
-  switch (status) {
+/**
+ * The row reports the *task*, not the session. A child that ran to the end and
+ * failed its gate used to sit in the widget as a green ✓, which is precisely
+ * the confusion the outcome field exists to remove.
+ */
+function icon(run: RunState): string {
+  switch (run.status) {
     case "running":
       return "⟳";
     case "done":
-      return "✓";
+      return run.outcome === "failed" ? "✗" : run.outcome === "blocked" ? "⚠" : "✓";
     case "error":
       return "✗";
     case "aborted":
       return "◼";
   }
+}
+
+type Tone = "warning" | "success" | "error";
+
+function tone(run: RunState): Tone {
+  if (run.status === "running") return "warning";
+  if (run.status !== "done") return "error";
+  if (run.outcome === "failed") return "error";
+  if (run.outcome === "blocked") return "warning";
+  return "success";
 }
 
 /**
@@ -44,13 +59,9 @@ export function buildWidgetLines(runs: RunState[], theme: ThemeLike, now: number
   lines.push(dim(`╭${title}${"─".repeat(pad)}${hint}╮`));
 
   const rows = visible.map((run) => {
-    const paint =
-      run.status === "running"
-        ? (s: string) => theme.fg("warning", s)
-        : run.status === "done"
-          ? (s: string) => theme.fg("success", s)
-          : (s: string) => theme.fg("error", s);
-    const head = paint(`${icon(run.status)} ${clampWidth(run.id, 16)}`);
+    const color = tone(run);
+    const paint = (s: string) => theme.fg(color, s);
+    const head = paint(`${icon(run)} ${clampWidth(run.id, 16)}`);
     const stats = dim(` · ${tokens(run.tokens)} tok · ${elapsed(run, now)}`);
     return `${dim("│ ")}${head}${stats} ${dim(clampWidth(run.task, 30))}`;
   });

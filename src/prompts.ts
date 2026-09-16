@@ -1,4 +1,39 @@
 import type { AgentDef, RunState } from "./types.ts";
+import { outcomeLine } from "./outcome.ts";
+
+/** Longest gate output kept in the report; a failing suite prints books. */
+const GATE_TAIL = 1200;
+
+/**
+ * What the gate proved, in the report. Shown whenever a gate ran — a pass is
+ * as much a fact as a failure, and silence would make "verified" and "never
+ * checked" look identical.
+ */
+function gateBlock(run: RunState): string[] {
+  const gate = run.gate;
+  if (!gate) return [];
+  const lines = [`[gate] ${gate.outcome} — ${gate.reason} (\`${gate.command}\`)`];
+  if (gate.repairs) {
+    lines.push(`  repaired ${gate.repairs} time${gate.repairs === 1 ? "" : "s"} and re-run.`);
+  }
+  if (gate.sharedWith?.length) {
+    lines.push(
+      `  ${gate.sharedWith.join(", ")} ${gate.sharedWith.length === 1 ? "was" : "were"} also changing this directory — the verdict is true of the tree, not of this agent's work alone.`,
+    );
+  }
+  if (!gate.ok && gate.output) {
+    const tail = gate.output.length > GATE_TAIL ? `…\n${gate.output.slice(-GATE_TAIL)}` : gate.output;
+    lines.push(tail.replace(/^/gm, "  "));
+  }
+  return lines;
+}
+
+/** The gate block plus the outcome line, for a run that has settled. */
+function verdict(run: RunState): string {
+  const parts = gateBlock(run);
+  if (run.outcome) parts.push(outcomeLine(run.outcome, run.verification ?? "not-requested"));
+  return parts.length > 0 ? `\n\n${parts.join("\n")}` : "";
+}
 
 /** Framing appended to every child's system prompt after the def body. */
 const CHILD_BASE = [
@@ -10,6 +45,10 @@ const CHILD_BASE = [
   "(the command you ran and what it showed); mark anything you could not verify as unverified",
   "rather than done. If you find yourself about to repeat what you just said without taking an",
   "action, stop and report where you are stuck instead — an idle turn is wasted.",
+  "Finishing your turn is not the same as finishing the task: if you could not do it,",
+  "end the report with a line reading exactly `OUTCOME: blocked` (a decision, access or",
+  "information you do not have) or `OUTCOME: failed` (you tried and it does not work),",
+  "so the caller does not have to infer it from your prose. Say nothing if it went fine.",
 ].join(" ");
 
 /**
@@ -46,8 +85,8 @@ export function formatRunResult(run: RunState): string {
   if (run.status === "done") {
     // Only a run that is genuinely still running may be reported as such.
     return run.result
-      ? `${header}\n${run.result}`
-      : `${header}\nThe child finished without producing an answer. Do not wait for it — re-run with a narrower task, or do the work here.`;
+      ? `${header}\n${run.result}${verdict(run)}`
+      : `${header}\nThe child finished without producing an answer. Do not wait for it — re-run with a narrower task, or do the work here.${verdict(run)}`;
   }
   if (run.status === "error") {
     const detail = run.error ?? "unknown failure";

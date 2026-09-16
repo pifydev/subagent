@@ -60,6 +60,9 @@ import {
 import { createIsolationWorktree, isolationNote, removeIfUnchanged, type Isolation } from "../src/isolate.ts";
 import { buildTaskPrompt, childFraming, describeDefs, formatRunResult } from "../src/prompts.ts";
 import { runVerification } from "../src/verify.ts";
+import { normalizeGate, runGate, sharedWith, type GateContract, type GateSibling } from "../src/gate.ts";
+import { runGateCycle } from "../src/repair.ts";
+import { deriveOutcome, parseDeclaredOutcome, stripDeclaration } from "../src/outcome.ts";
 import { mintRunId, seedCounters } from "../src/ids.ts";
 import { buildWidgetLines } from "../src/widget.ts";
 import {
@@ -444,6 +447,64 @@ export default function subagent(pi: ExtensionAPI) {
     });
   }
 
+  /** An agent that can write is one that can fix what a gate complained about. */
+  const canWrite = (def: AgentDef) =>
+    def.tools.some((t) => t === "edit" || t === "write" || t === "bash" || t === "powershell");
+
+  /**
+   * Run the caller's gate in the tree the child worked in and, if it failed,
+   * send the child back to fix it before the result is returned. The verdict is
+   * recorded on the run either way — a gate that passed is a fact worth saying,
+   * and a gate that could not run says so rather than blaming the work.
+   */
+  async function gateRun(
+    ctx: UiContext,
+    run: RunState,
+    def: AgentDef,
+    contract: GateContract,
+    attempts: number,
+  ): Promise<void> {
+    const subject = run.workDir ?? ctx.cwd;
+    const self: GateSibling = { id: 0, label: run.id, status: run.status, workDir: run.workDir };
+    const siblings: GateSibling[] = [...runs.values()]
+      .filter((r) => r.id !== run.id)
+      .map((r, i) => ({ id: i + 1, label: r.id, status: r.status, workDir: r.workDir }));
+
+    const { record, verification } = await runGateCycle(run.task, contract, subject, {
+      runGate,
+      canRepair: canWrite(def),
+      maxAttempts: attempts,
+      sharedWith: sharedWith(self, subject, siblings),
+      repair: async (prompt) => {
+        const fix = mkRun(nextId(def.name), def.name, prompt);
+        runs.set(fix.id, fix);
+        renderWidget(ctx);
+        await runChild(ctx, def, fix, run.workDir);
+        // The repair's own report replaces the stale one: the caller must not
+        // be handed a description of a tree that has since changed.
+        if (fix.status === "done" && fix.result?.trim()) run.result = fix.result;
+      },
+    });
+    run.gate = record;
+    run.verification = verification;
+  }
+
+  /**
+   * Settle the two facts a caller needs and the status alone cannot give: what
+   * the task came to, and how well that is known. Idempotent, and safe to call
+   * on a run that never had a gate.
+   */
+  function settleOutcome(run: RunState): void {
+    // Settled once and for good: re-running it after the isolation note has
+    // been appended would find the declaration already stripped and quietly
+    // promote a blocked run to a successful one.
+    if (run.status === "running" || run.outcome) return;
+    const declared = parseDeclaredOutcome(run.result);
+    if (declared && run.result) run.result = stripDeclaration(run.result);
+    run.verification ??= "not-requested";
+    run.outcome = deriveOutcome({ status: run.status, declared, verification: run.verification });
+  }
+
   /**
    * Stop a run and the child it started. Both meanings of "stop" — the user's
    * abort and session teardown — come through here; marking the record
@@ -456,6 +517,7 @@ export default function subagent(pi: ExtensionAPI) {
       run.status = "aborted";
       run.finishedAt = Date.now();
       run.error = cancelNote(reason, stopped);
+      settleOutcome(run);
     }
     renderWidget();
   }
@@ -478,7 +540,10 @@ export default function subagent(pi: ExtensionAPI) {
       "For MUTATING tasks set isolation=worktree: the child gets its own git worktree and branch, the " +
       "main checkout stays untouched, and the report says how to merge or discard. " +
       "Set verify=true for work worth double-checking: the reviewer agent judges the result and, if it finds " +
-      "real problems, the worker gets one revision pass before the result is returned.",
+      "real problems, the worker gets one revision pass before the result is returned. " +
+      "Prefer gate for anything that can be checked by running something: the command runs in the child's " +
+      "own working directory after it finishes, a failure sends the child back to fix it once, and the " +
+      "report says what the check proved instead of only what the child claims.",
     parameters: Type.Object({
       agent: Type.String({ description: "Agent type name" }),
       task: Type.String({ description: "Complete task brief for the child" }),
@@ -487,10 +552,34 @@ export default function subagent(pi: ExtensionAPI) {
       verify: Type.Optional(
         Type.Boolean({ description: "After the worker finishes, have the reviewer check it and allow one revision (default false)" }),
       ),
+      gate: Type.Optional(
+        Type.String({
+          description:
+            "Shell command that must pass for the work to count as verified, e.g. \"bun test\" or \"tsc --noEmit\". Run in the child's working directory once it finishes.",
+        }),
+      ),
+      gateExpect: Type.Optional(
+        Type.String({
+          description:
+            "Regex the gate output must match. Use it when exit 0 does not prove the check ran (e.g. \"[1-9][0-9]* pass\"); exiting 0 without a match is reported as verifying nothing.",
+        }),
+      ),
+      gateRepairs: Type.Optional(
+        Type.Number({ description: "Repair passes allowed after a failed gate, 0-5 (default 1)" }),
+      ),
     }),
     async execute(
       _id,
-      params: { agent: string; task: string; background?: boolean; isolation?: string; verify?: boolean },
+      params: {
+        agent: string;
+        task: string;
+        background?: boolean;
+        isolation?: string;
+        verify?: boolean;
+        gate?: string;
+        gateExpect?: string;
+        gateRepairs?: number;
+      },
       signal,
       _onUpdate,
       ctx,
@@ -505,6 +594,25 @@ export default function subagent(pi: ExtensionAPI) {
 
       const uiCtx = ctx as UiContext;
       const background = params.background === true;
+
+      // A gate is validated up front: a broken contract should be a tool error
+      // the caller can fix now, not a "verified nothing" verdict discovered
+      // after a child has already spent a full run.
+      let gate: GateContract | null = null;
+      if (params.gate?.trim()) {
+        gate = normalizeGate(params.gate.trim());
+        const expect = params.gateExpect?.trim();
+        if (expect) {
+          try {
+            new RegExp(expect, "m");
+          } catch {
+            throw new Error(`gateExpect is not a valid regular expression: ${expect}`);
+          }
+          gate.expect = expect;
+        }
+      } else if (params.gateExpect?.trim()) {
+        throw new Error("gateExpect needs a gate command to judge.");
+      }
 
       // v0.2: worktree isolation for mutating children — its own branch and
       // checkout under ~/.worktrees/, never touching the main tree.
@@ -525,6 +633,7 @@ export default function subagent(pi: ExtensionAPI) {
         turns: 0,
         result: null,
         error: null,
+        ...(isolation ? { workDir: isolation.path } : {}),
       };
       runs.set(run.id, run);
       renderWidget(uiCtx);
@@ -557,6 +666,24 @@ export default function subagent(pi: ExtensionAPI) {
             // verification is a convenience; the worker's result already stands
           }
         }
+        // The gate runs last and inside the worktree, so it judges the tree the
+        // caller will actually merge — after any revision, before cleanup.
+        if (gate && run.status === "done") {
+          try {
+            await gateRun(uiCtx, run, def, gate, params.gateRepairs ?? 1);
+          } catch (err) {
+            // A gate that throws proved nothing; say so rather than losing the
+            // child's work to an error in the checking machinery.
+            run.gate = {
+              command: gate.command,
+              outcome: "no_attestation",
+              ok: false,
+              reason: `gate could not be run: ${err instanceof Error ? err.message : String(err)}`,
+            };
+            run.verification = "inconclusive";
+          }
+        }
+        settleOutcome(run);
         if (isolation) {
           // A worktree the child left untouched is removed with its branch —
           // the common case for a review or a search, and the cleanup all

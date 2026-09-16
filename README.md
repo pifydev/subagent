@@ -23,6 +23,36 @@ The other half is scope. A child with four read-only tools and a fifteen-turn ca
 | `background` | boolean, optional | Return an id immediately instead of blocking; up to 4 concurrent |
 | `isolation` | `"worktree"`, optional | Run the child in its own git worktree |
 | `verify` | boolean, optional | After the worker finishes, the reviewer checks it and the worker gets one revision if needed |
+| `gate` | string, optional | A command that must pass — `bun test`, `tsc --noEmit` — run in the child's own working directory |
+| `gateExpect` | string, optional | Regex the gate output must match, for checks that exit 0 without proving anything |
+| `gateRepairs` | number, optional | Repair passes after a failed gate, 0–5 (default 1) |
+
+**Gated runs.** `verify` asks another model whether the work is good. A gate asks the shell. The command runs in the tree the child actually worked in — its worktree under `isolation: "worktree"` — after it finishes and after any revision, so it judges what you would merge.
+
+What the gate found is reported as its own fact, and it can say more than pass/fail:
+
+| Verdict | Meaning |
+|---|---|
+| `success` | exited 0, and matched `gateExpect` if you gave one |
+| `failure` | exited nonzero, or matched a failure pattern |
+| `result_missing` | exited 0 but never showed the evidence — *a test runner that matched no tests, a `\|\| true` left behind* |
+| `timeout` | given its deadline and did not clear it |
+| `no_attestation` | never ran at all — a missing runner, a typo, a broken pattern |
+
+A failing gate sends the child back once with the command, the verdict and the output, then re-runs the gate; `gateRepairs: 0` turns that off. A read-only agent is never asked to repair, and a `no_attestation` verdict never triggers one — a gate that proved nothing is a bug in the gate, and sending an agent to "fix" it is how working code gets broken. If other runs were changing the same directory while the gate ran, the report says so: that verdict is true of the tree, not of this agent's work alone.
+
+**Outcomes.** A run now reports two facts instead of one. The status says whether the *session* finished; the outcome says whether the *task* did.
+
+```
+[worker · worker-1 · done · 14 turns]
+Added the retry and the regression test.
+
+[gate] failure — gate exited 1 (`bun test`)
+  1 fail: retries the wrong error class
+[outcome] failed — a gate ran and failed
+```
+
+A gate that failed outranks a child that claims success. Without a gate the outcome is the agent's own account, and a child that could not finish can say so in one parseable place by ending its report with `OUTCOME: blocked` or `OUTCOME: failed`. The widget follows the outcome too — a run that completed and failed its gate is a red ✗, not a green ✓.
 
 **Verified runs.** With `verify: true`, a finished result is handed to the `reviewer` agent, which judges it against the task and either passes it or lists the changes it needs; on changes, the worker gets **one** revision pass (in the same worktree if isolated) and the corrected result comes back with a note. It is bounded to a single round so it can never ping-pong, and best-effort — a reviewer that can't run returns the result marked unverified rather than failing the whole thing. This is `ask_supervisor`'s opposite number: escalate a decision to the human, or have a peer check the work.
 
