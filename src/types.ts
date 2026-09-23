@@ -55,6 +55,16 @@ export interface AgentDef {
 export const DEFAULT_MAX_TURNS = 30;
 export const MAX_CONCURRENT_BACKGROUND = 4;
 
+/**
+ * Wall-clock bound on one child run, on top of its turn cap. A tool that
+ * never returns emits no message_end, so the cap alone could not end it.
+ * Generous on purpose: a legitimate child running long builds must not be
+ * cut off; a child that is genuinely stuck must not hold a slot forever.
+ */
+export const RUN_TIMEOUT_MS = 60 * 60_000;
+/** After the deadline's abort, how long to let the child's loop unwind before moving on without it. */
+export const ABORT_GRACE_MS = 15_000;
+
 export type RunStatus = "running" | "done" | "error" | "aborted";
 
 /** What a gate proved about one run, kept alongside the run it judged. */

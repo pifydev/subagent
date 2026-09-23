@@ -70,7 +70,8 @@ import { extractReport, markReport, type ReportMessage } from "../src/report.ts"
 import { RESULT_ENTRY, persistable, replayRuns } from "../src/persist.ts";
 import { mintRunId, seedCounters } from "../src/ids.ts";
 import { buildWidgetLines, isVisible } from "../src/widget.ts";
-import { MAX_CONCURRENT_BACKGROUND, type AgentDef, type RunState, type RunStatus } from "../src/types.ts";
+import { ABORT_GRACE_MS, MAX_CONCURRENT_BACKGROUND, RUN_TIMEOUT_MS, type AgentDef, type RunState, type RunStatus } from "../src/types.ts";
+import { outlasts, settleWithin } from "../src/deadline.ts";
 
 const MENTION_ENTRY = "subagent-mention";
 /** Longest agent_result may block waiting for a run, in seconds. */
@@ -350,7 +351,18 @@ export default function subagent(pi: ExtensionAPI) {
         }
       });
 
-      await session.prompt(buildTaskPrompt(run.task), { source: "extension" } as never);
+      // A run has a clock as well as a turn cap: the cap and the loop guard
+      // act at message_end, and a tool whose execute() never resolves emits
+      // none — the run, and the background slot it holds, would be stranded.
+      const prompting = session.prompt(buildTaskPrompt(run.task), { source: "extension" } as never);
+      if (await outlasts(prompting, RUN_TIMEOUT_MS)) {
+        // The same stop Esc performs, with its own note in the record; the
+        // abort reaches every tool through its signal. A tool that ignores
+        // its signal keeps this session (disposed below) — it no longer keeps
+        // this run, its slot, or a parent blocking on it.
+        cancelRun(run, "timeout");
+        await settleWithin(prompting, ABORT_GRACE_MS);
+      }
 
       // The report is the last thing the child SAID, not the last message it
       // sent: after a turn-cap abort or an Esc mid-tool that message is often

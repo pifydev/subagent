@@ -1,5 +1,6 @@
 import type { AgentDef, RunState } from "./types.ts";
 import { outcomeLine } from "./outcome.ts";
+import { UNTRUSTED_REPORT_NOTE, neutralizeReport } from "./pending.ts";
 
 /** Longest gate output kept in the report; a failing suite prints books. */
 const GATE_TAIL = 1200;
@@ -82,10 +83,13 @@ export function buildTaskPrompt(task: string): string {
 /** Tool-result text returned to the parent model for a finished run. */
 export function formatRunResult(run: RunState): string {
   const header = `[${run.agent} · ${run.id} · ${run.status} · ${run.turns} turns]`;
+  // What the child wrote, framed as such: it cannot forge the harness's
+  // control tags, and the reader is told whose words these are.
+  const framed = (text: string) => `${UNTRUSTED_REPORT_NOTE}\n${neutralizeReport(text, "subagent")}`;
   if (run.status === "done") {
     // Only a run that is genuinely still running may be reported as such.
     return run.result
-      ? `${header}\n${run.result}${verdict(run)}`
+      ? `${header}\n${framed(run.result)}${verdict(run)}`
       : `${header}\nThe child finished without producing an answer. Do not wait for it — re-run with a narrower task, or do the work here.${verdict(run)}`;
   }
   if (run.status === "error") {
@@ -101,7 +105,10 @@ export function formatRunResult(run: RunState): string {
     return `${header}\nFailed after ${run.turns} turn${run.turns === 1 ? "" : "s"}: ${detail}\nThe child got partway; narrow the task or do it here rather than re-running the same brief.`;
   }
   if (run.status === "aborted") {
-    return `${header}\nAborted (turn limit or user stop). Partial output:\n${run.result ?? "(none)"}`;
+    // cancelRun says who stopped it and what that cost; a turn-cap stop leaves
+    // error empty. Either way the reader should not have to guess.
+    const why = (run.error ?? "turn limit or user stop").replace(/\.$/, "");
+    return `${header}\nAborted — ${why}. Partial output:\n${run.result ? framed(run.result) : "(none)"}`;
   }
   return `${header}\nStill running — call agent_result with id "${run.id}" later.`;
 }
