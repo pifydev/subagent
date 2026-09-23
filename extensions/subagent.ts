@@ -72,6 +72,7 @@ import { mintRunId, seedCounters } from "../src/ids.ts";
 import { buildWidgetLines, isVisible } from "../src/widget.ts";
 import { ABORT_GRACE_MS, MAX_CONCURRENT_BACKGROUND, RUN_TIMEOUT_MS, type AgentDef, type RunState, type RunStatus } from "../src/types.ts";
 import { outlasts, settleWithin } from "../src/deadline.ts";
+import { addChildSpend } from "../src/child-cost.ts";
 
 const MENTION_ENTRY = "subagent-mention";
 /** Longest agent_result may block waiting for a run, in seconds. */
@@ -318,7 +319,7 @@ export default function subagent(pi: ExtensionAPI) {
           event as {
             message?: {
               role?: string;
-              usage?: { totalTokens?: number };
+              usage?: { totalTokens?: number; cost?: { total?: number } };
               content?: Array<{ type?: string; text?: string }>;
             };
           }
@@ -327,6 +328,9 @@ export default function subagent(pi: ExtensionAPI) {
           run.turns++;
           const usage = message.usage;
           if (usage && typeof usage.totalTokens === "number") run.tokens += usage.totalTokens;
+          // A child's spend never reaches the parent's branch; tell the
+          // suite-wide tally so @pify/usage can show it beside the session cost.
+          if (usage) addChildSpend("subagent", { cost: usage.cost?.total, tokens: usage.totalTokens });
 
           // A turn cap bounds cost; it does not notice a child spinning —
           // restating the same thing every turn without calling a tool. Stop
