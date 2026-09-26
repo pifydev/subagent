@@ -73,6 +73,7 @@ import { buildWidgetLines, isVisible } from "../src/widget.ts";
 import { ABORT_GRACE_MS, MAX_CONCURRENT_BACKGROUND, RUN_TIMEOUT_MS, type AgentDef, type RunState, type RunStatus } from "../src/types.ts";
 import { outlasts, settleWithin } from "../src/deadline.ts";
 import { addChildSpend } from "../src/child-cost.ts";
+import { shouldWrapUp, wrapUpNotice } from "../src/wrap-up.ts";
 
 const MENTION_ENTRY = "subagent-mention";
 /** Longest agent_result may block waiting for a run, in seconds. */
@@ -214,6 +215,7 @@ export default function subagent(pi: ExtensionAPI) {
     let unsubscribe: (() => void) | null = null;
     let releaseLive: (() => void) | null = null;
     let stallReason: string | null = null;
+    let wrapUpSent = false;
     try {
       let model = ctx.model ?? null;
       if (def.model) {
@@ -349,6 +351,13 @@ export default function subagent(pi: ExtensionAPI) {
           }
 
           renderWidget();
+          // One turn before the cap, say so: the child's last turn becomes a
+          // report instead of one more tool call. steer() lands after the
+          // current tool results, ahead of anything else queued.
+          if (shouldWrapUp(run.turns, def.maxTurns, wrapUpSent)) {
+            wrapUpSent = true;
+            void session?.steer(wrapUpNotice(def.maxTurns)).catch(() => {});
+          }
           if (run.turns >= def.maxTurns) {
             void session?.abort().catch(() => {});
           }
