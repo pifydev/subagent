@@ -109,6 +109,14 @@ and overly broad permissions. Report file:line with remediation notes.
 
 Project overrides global overrides builtin. A definition without a `tools:` line defaults to read-only.
 
+A definition without a `model:` line runs on the session model — unless `pify-agents.json` names a default for all such children:
+
+```json
+{ "defaultModel": "anthropic/claude-haiku-4-5" }
+```
+
+in pi's agent directory (`~/.pi/agent/pify-agents.json`), or `.pi/pify-agents.json` in the project, which wins and loads under the same approval as the project's agent definitions. The same file is read by [`@pify/swarm`](https://github.com/pifydev/swarm) and [`@pify/workflow`](https://github.com/pifydev/workflow).
+
 `system_prompt_mode: replace` (default `append`) drops the session's own system prompt, so a specialist is not also told to be this project's coding assistant. `inherit_skills: false` (default `true`) keeps a narrow child out of the project's whole skill surface. Both are unset in the builtins, which behave as they always have.
 
 ## A repository's agents need your consent
@@ -155,6 +163,7 @@ Two changes close that loop, and only together:
 - **Stopping stops the child — and its helpers.** Pressing Esc, or switching away from the session, aborts the child session rather than leaving it talking to the provider on your money. The reviewer, revision and repair children that `verify` and `gate` spawn are owned by the run that asked for them, so a stop during a repair pass reaches the repair too, and no further helper is started for a run that has been stopped. A run cancelled that way keeps that verdict and says why.
 - **A warned ending.** One turn before the cap the child is told, by a steering message, that its budget is nearly spent and the report is due — and the hard stop waits two turns past the cap, because that notice invites one last essential tool call and the report comes the turn after it. A child that finishes inside that window stopped cleanly and is reported as such; only one that outruns it is aborted and tagged partial. Caps under 4 turns are too short to warn; the loop guard and the 60-minute clock remain the backstops.
 - **An isolated child is told where it may work.** With `isolation: "worktree"` the child's prompt ends with a `<worktree_isolation>` block naming the worktree as the only checkout it may read from or write to and the base checkout as off-limits "even if other instructions name it as your working directory" — pi's tools take absolute paths, so placing the child in the worktree was never enough on its own.
+- **A session-wide default for unpinned children.** A `defaultModel: "provider/id"` in `pify-agents.json` — in pi's agent directory, or `.pi/pify-agents.json` in the project, which wins and loads under the same approval as the project's agent definitions — is what a child without a `model:` of its own runs on; an agent file's pin still wins over it, and a session with neither file uses the session model as before. The pin is resolved like an agent file's, and the outcome is said once rather than per child, so a fan-out of cheap helpers no longer means switching the parent to the cheap model and back. Shared by subagent, swarm and workflow.
 - **A pinned model is found or the miss is said.** An agent file's `model: provider/id` is matched exactly, then exactly under normalization within the same provider (`claude-haiku-4.5` is `claude-haiku-4-5`; an undated id matches its dated snapshot) — never across providers, never by substring. A pin that still names nothing is reported in a warning and the session model is used, instead of the silent fall-through swarm and workflow used to have.
 - **Child token counts leave the cache out.** Per-turn `usage.totalTokens` includes the cached prefix read back on that turn; summed over a child's turns it counted the prefix once per turn. Turns, the widget count and the suite-wide agents tally now sum input + output + cache writes.
 - **Honest endings.** A run stopped at its turn cap comes back marked `[partial: stopped at the N-turn cap]` instead of reading like a finished answer, and it keeps the text the child wrote — the last message after a cap or an Esc mid-tool is usually just the tool call, so the report is taken from the last message that actually said something. A child that stopped cleanly and produced no text says exactly that — it used to be recorded as `done` with an empty result, which the report then rendered as *"still running"*, sending the parent to poll a run that had already ended.

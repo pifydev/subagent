@@ -77,6 +77,7 @@ import { shouldAbort, shouldWrapUp, wrapUpNotice } from "../src/wrap-up.ts";
 import { childTokens } from "../src/tokens.ts";
 import { resolveChildModel } from "../src/child-model.ts";
 import { findPinnedModel } from "../src/model-match.ts";
+import { readDefaultModel } from "../src/default-model.ts";
 
 const MENTION_ENTRY = "subagent-mention";
 /** Longest agent_result may block waiting for a run, in seconds. */
@@ -135,6 +136,27 @@ export default function subagent(pi: ExtensionAPI) {
 
   function notify(ctx: UiContext, message: string, level: "info" | "warning" | "error"): void {
     if (ctx.hasUI) ctx.ui.notify(message, level);
+  }
+
+  /**
+   * The model a child defaults to when its definition pins none: the
+   * `defaultModel` of `pify-agents.json` (global, or the project's under the
+   * same approval as its agent definitions). Resolved like an agent file's
+   * pin; found or missed, each distinct outcome is said once per instance so
+   * the fan-out does not repeat it per child.
+   */
+  let defaultModelSaid: string | null = null;
+  async function fallbackModel(ctx: UiContext, who: string): Promise<UiContext["model"] | null> {
+    const found = readDefaultModel(getAgentDir(), ctx.cwd, await projectAgentsAllowed(ctx));
+    if (!found) return null;
+    const pinned = findPinnedModel(ctx.modelRegistry, found.pin);
+    const key = `${found.file}\n${found.pin}\n${pinned.model ? pinned.model.id : pinned.reason}`;
+    if (defaultModelSaid !== key) {
+      defaultModelSaid = key;
+      if (pinned.model) notify(ctx, `subagent ${who}: no model pinned — children default to ${found.pin} (${found.file})`, "info");
+      else notify(ctx, `subagent ${who}: defaultModel in ${found.file}: ${pinned.reason} — using session model`, "warning");
+    }
+    return pinned.model;
   }
 
   // ── Child runner ─────────────────────────────────────────────────────
@@ -227,6 +249,9 @@ export default function subagent(pi: ExtensionAPI) {
         const pinned = findPinnedModel(ctx.modelRegistry, def.model);
         if (pinned.model) model = pinned.model;
         else notify(ctx, `subagent ${run.id}: ${pinned.reason} — using session model`, "warning");
+      } else {
+        // No pin of its own: the suite-wide defaultModel from pify-agents.json, if any.
+        model = (await fallbackModel(ctx, run.id)) ?? model;
       }
       if (!model) throw new Error("No model available");
       // pi 0.99: a virtual selection cannot drive a child session (the fresh
