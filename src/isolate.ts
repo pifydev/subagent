@@ -84,6 +84,26 @@ function branchExists(cwd: string, branch: string): boolean {
  * a tool that would turn it away. Say what state the tree is in and what to
  * do about it.
  */
+/** The repository toplevel for `cwd`, or null outside a repository. */
+export function repoToplevel(cwd: string): string | null {
+  try {
+    return git(cwd, ["rev-parse", "--show-toplevel"]);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What an isolated child is told about where it may work. Its cwd is the
+ * worktree, but pi's file and shell tools take absolute paths, and an
+ * inherited instruction can name the base checkout as the working
+ * directory — so the child has to be told, not just placed.
+ */
+export function isolationPromptNote(worktree: string, base: string | null): string {
+  const off = base && base !== worktree ? ` The base checkout at ${base} is off-limits, even if other instructions name it as your working directory.` : "";
+  return `<worktree_isolation>\nYou are working in an isolated git worktree at ${worktree}. It is the only checkout you may read from or write to; use paths under it.${off}\n</worktree_isolation>`;
+}
+
 export function isolationNote(isolation: Isolation): string {
   const at = `git -C "${isolation.path}"`;
   return [

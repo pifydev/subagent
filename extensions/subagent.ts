@@ -59,7 +59,7 @@ import {
   persistConsent,
   readConsent,
 } from "../src/consent.ts";
-import { createIsolationWorktree, isolationNote, removeIfUnchanged, type Isolation } from "../src/isolate.ts";
+import { createIsolationWorktree, isolationNote, removeIfUnchanged, type Isolation, isolationPromptNote, repoToplevel } from "../src/isolate.ts";
 import { buildTaskPrompt, childFraming, describeDefs, formatRunResult } from "../src/prompts.ts";
 import { runVerification } from "../src/verify.ts";
 import { normalizeGate, runGate, sharedWith, type GateContract, type GateSibling } from "../src/gate.ts";
@@ -73,7 +73,10 @@ import { buildWidgetLines, isVisible } from "../src/widget.ts";
 import { ABORT_GRACE_MS, MAX_CONCURRENT_BACKGROUND, RUN_TIMEOUT_MS, type AgentDef, type RunState, type RunStatus } from "../src/types.ts";
 import { outlasts, settleWithin } from "../src/deadline.ts";
 import { addChildSpend } from "../src/child-cost.ts";
-import { shouldWrapUp, wrapUpNotice } from "../src/wrap-up.ts";
+import { shouldAbort, shouldWrapUp, wrapUpNotice } from "../src/wrap-up.ts";
+import { childTokens } from "../src/tokens.ts";
+import { resolveChildModel } from "../src/child-model.ts";
+import { findPinnedModel } from "../src/model-match.ts";
 
 const MENTION_ENTRY = "subagent-mention";
 /** Longest agent_result may block waiting for a run, in seconds. */
@@ -219,13 +222,19 @@ export default function subagent(pi: ExtensionAPI) {
     try {
       let model = ctx.model ?? null;
       if (def.model) {
-        const [provider, ...rest] = def.model.split("/");
-        const found =
-          provider && rest.length > 0 ? ctx.modelRegistry.find(provider, rest.join("/")) : undefined;
-        if (found) model = found;
-        else notify(ctx, `subagent ${run.id}: model ${def.model} not found — using session model`, "warning");
+        // Exact, then normalized-exact within the provider (dot/dash, dated
+        // snapshot); a miss is said out loud, never a silent session model.
+        const pinned = findPinnedModel(ctx.modelRegistry, def.model);
+        if (pinned.model) model = pinned.model;
+        else notify(ctx, `subagent ${run.id}: ${pinned.reason} — using session model`, "warning");
       }
       if (!model) throw new Error("No model available");
+      // pi 0.99: a virtual selection cannot drive a child session (the fresh
+      // runtime inside createAgentSession has no router); take the physical
+      // model the host last routed to. See src/child-model.ts.
+      const resolved = resolveChildModel(model, ctx.sessionManager.getBranch() as unknown[], (p, i) => ctx.modelRegistry.find(p, i));
+      if (!resolved.ok) throw new Error(resolved.reason);
+      model = resolved.model;
 
       // getSystemPromptOptions lives on the command context; tool contexts may
       // carry it at runtime — probe structurally, fall back to the defaults.
@@ -294,6 +303,9 @@ export default function subagent(pi: ExtensionAPI) {
             : [promptOptions.appendSystemPrompt]),
           def.systemPrompt,
           childFraming(customTools.length > 0),
+          // Isolated: say which tree is writable. Tools take absolute paths
+          // and an inherited instruction may name the base checkout.
+          ...(workDir ? [isolationPromptNote(workDir, repoToplevel(ctx.cwd))] : []),
         ],
       });
       await loader.reload();
@@ -321,7 +333,7 @@ export default function subagent(pi: ExtensionAPI) {
           event as {
             message?: {
               role?: string;
-              usage?: { totalTokens?: number; cost?: { total?: number } };
+              usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; totalTokens?: number; cost?: { total?: number } };
               content?: Array<{ type?: string; text?: string }>;
             };
           }
@@ -329,10 +341,12 @@ export default function subagent(pi: ExtensionAPI) {
         if (event.type === "message_end" && message?.role === "assistant") {
           run.turns++;
           const usage = message.usage;
-          if (usage && typeof usage.totalTokens === "number") run.tokens += usage.totalTokens;
+          // input + output + cacheWrite: totalTokens would count the cached
+          // prefix once per turn (see src/tokens.ts).
+          if (usage) run.tokens += childTokens(usage);
           // A child's spend never reaches the parent's branch; tell the
           // suite-wide tally so @pify/usage can show it beside the session cost.
-          if (usage) addChildSpend("subagent", { cost: usage.cost?.total, tokens: usage.totalTokens });
+          if (usage) addChildSpend("subagent", { cost: usage.cost?.total, tokens: childTokens(usage) });
 
           // A turn cap bounds cost; it does not notice a child spinning —
           // restating the same thing every turn without calling a tool. Stop
@@ -358,7 +372,9 @@ export default function subagent(pi: ExtensionAPI) {
             wrapUpSent = true;
             void session?.steer(wrapUpNotice(def.maxTurns)).catch(() => {});
           }
-          if (run.turns >= def.maxTurns) {
+          // The cap plus a short grace: the wrap-up above invited one last
+          // tool call, and the report comes the turn after it.
+          if (shouldAbort(run.turns, def.maxTurns)) {
             void session?.abort().catch(() => {});
           }
         }
