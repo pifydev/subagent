@@ -22,6 +22,7 @@ function def(name: string): AgentDef {
     systemPrompt: "",
     systemPromptMode: "append",
     inheritSkills: true,
+    inheritProviders: false,
     source: "builtin",
   };
 }

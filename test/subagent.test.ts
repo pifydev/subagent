@@ -264,6 +264,27 @@ test("v0.3 system_prompt_mode and inherit_skills parse with safe defaults", () =
   }
 });
 
+test("inherit_providers defaults off and parses truthy/falsey (opt-in provider sharing)", () => {
+  const base = (extra: string) =>
+    parseAgentFile("x", `---
+description: d
+${extra}
+---
+body`, "project")!;
+  // Safe default: a child inherits no providers, exactly as before.
+  assert.equal(base("tools: read").inheritProviders, false);
+  for (const truthy of ["true", "yes", "on", "1", ""]) {
+    assert.equal(base(`inherit_providers: ${truthy}`).inheritProviders, true, truthy);
+  }
+  for (const falsey of ["false", "no", "off", "0", "False", " NO "]) {
+    assert.equal(base(`inherit_providers: ${falsey}`).inheritProviders, false, falsey);
+  }
+  // The builtins never inherit providers.
+  for (const [, content] of Object.entries(BUILTIN_AGENTS)) {
+    assert.equal(parseAgentFile("b", content, "builtin")!.inheritProviders, false);
+  }
+});
+
 test("v0.3 builtin agents keep the defaults", () => {
   for (const [name, content] of Object.entries(BUILTIN_AGENTS)) {
     const def = parseAgentFile(name, content, "builtin")!;

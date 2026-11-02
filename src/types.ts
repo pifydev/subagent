@@ -49,6 +49,17 @@ export interface AgentDef {
   systemPromptMode: "append" | "replace";
   /** Whether the child loads the project's skills (default true). */
   inheritSkills: boolean;
+  /**
+   * Whether the child shares the PARENT'S model providers — including those a
+   * `pi` extension registered with `registerProvider` (default false). A child
+   * is spawned with no extensions, so a model whose provider came from an
+   * extension (`command-code/…`, a corporate gateway) is unreachable and the
+   * run fails with "No API key found for <provider>". With this on, the child
+   * is handed the parent's model runtime, so it can reach every provider the
+   * parent can — and ONLY that: no extension is loaded into the child and no
+   * tool is added to its surface.
+   */
+  inheritProviders: boolean;
   source: "builtin" | "global" | "project";
 }
 

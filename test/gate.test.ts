@@ -219,6 +219,7 @@ function agent(tools: AgentDef["tools"]): AgentDef {
     systemPrompt: "",
     systemPromptMode: "append",
     inheritSkills: true,
+    inheritProviders: false,
     source: "builtin",
   };
 }

@@ -260,6 +260,24 @@ export default function subagent(pi: ExtensionAPI) {
       if (!resolved.ok) throw new Error(resolved.reason);
       model = resolved.model;
 
+      // inherit_providers: hand the child the PARENT'S model runtime so a model
+      // whose provider an extension registered (registerProvider) is reachable
+      // — otherwise createAgentSession builds a FRESH runtime that knows only
+      // the on-disk providers, and an extension-provided model fails with "No
+      // API key found for <provider>" before the first turn. The runtime is the
+      // sole thing shared: no extension is loaded into the child (noExtensions
+      // stays) and no tool is added. ctx.modelRegistry wraps the runtime in a
+      // private field; reach it structurally. Sharing is safe — AgentSession's
+      // dispose() never touches the runtime and ModelRuntime has no teardown,
+      // so the child ending cannot disturb the parent.
+      let inheritedRuntime: unknown;
+      if (def.inheritProviders) {
+        inheritedRuntime = (ctx.modelRegistry as unknown as { runtime?: unknown }).runtime;
+        if (!inheritedRuntime) {
+          notify(ctx, `subagent ${run.id}: inherit_providers is set but this pi does not expose the provider runtime — the child uses on-disk providers only`, "warning");
+        }
+      }
+
       // getSystemPromptOptions lives on the command context; tool contexts may
       // carry it at runtime — probe structurally, fall back to the defaults.
       const promptHost = ctx as unknown as {
@@ -343,6 +361,7 @@ export default function subagent(pi: ExtensionAPI) {
         tools: customTools.length > 0 ? [...def.tools, ASK_TOOL_NAME] : def.tools,
         customTools: customTools as never,
         resourceLoader: loader,
+        ...(inheritedRuntime ? { modelRuntime: inheritedRuntime as never } : {}),
       });
       session = created.session;
       // Under its own id and its owner's: Esc on the parent stops the helper

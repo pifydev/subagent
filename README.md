@@ -105,6 +105,7 @@ thinking: low
 max_turns: 15
 system_prompt_mode: replace
 inherit_skills: false
+inherit_providers: true
 ---
 
 You are a security auditor. Scan for hardcoded secrets, injection flaws,
@@ -122,6 +123,8 @@ A definition without a `model:` line runs on the session model — unless `pify-
 in pi's agent directory (`~/.pi/agent/pify-agents.json`), or `.pi/pify-agents.json` in the project, which wins and loads under the same approval as the project's agent definitions. The same file is read by [`@pify/swarm`](https://github.com/pifydev/swarm) and [`@pify/workflow`](https://github.com/pifydev/workflow).
 
 `system_prompt_mode: replace` (default `append`) drops the session's own system prompt, so a specialist is not also told to be this project's coding assistant. `inherit_skills: false` (default `true`) keeps a narrow child out of the project's whole skill surface. Both are unset in the builtins, which behave as they always have.
+
+`inherit_providers: true` (default `false`) lets the child reach the **model providers** the parent can — including one a `pi` extension registered with `registerProvider` (a corporate gateway, a `command-code/…` model). A child is spawned with no extensions, so without this a model whose provider came from an extension is unreachable and the run fails before its first turn with `No API key found for <provider>`. This shares only the parent's model runtime: no extension is loaded into the child and no tool is added to its surface, so the blast radius `noExtensions` closes stays closed — the child simply gains the parent's provider auth for the model it was already going to call. Leave it off unless a child needs an extension-provided model.
 
 ## A repository's agents need your consent
 

@@ -48,6 +48,8 @@ export function parseAgentFile(
   const promptMode = fields.get("system_prompt_mode")?.toLowerCase();
   const systemPromptMode = promptMode === "replace" ? "replace" : "append";
   const inheritSkills = !isFalse(fields.get("inherit_skills"));
+  // Default false: today's behaviour (no extensions, no inherited providers).
+  const inheritProviders = isTrue(fields.get("inherit_providers"));
 
   return {
     name: name.toLowerCase(),
@@ -59,6 +61,7 @@ export function parseAgentFile(
     systemPrompt: match[2]!.trim(),
     systemPromptMode,
     inheritSkills,
+    inheritProviders,
     source,
   };
 }
@@ -67,6 +70,11 @@ export function parseAgentFile(
 function isFalse(raw: string | undefined): boolean {
   if (raw === undefined) return false;
   return ["false", "no", "off", "0"].includes(raw.trim().toLowerCase());
+}
+
+function isTrue(raw: string | undefined): boolean {
+  if (raw === undefined) return false;
+  return ["true", "yes", "on", "1", ""].includes(raw.trim().toLowerCase());
 }
 
 /**
