@@ -412,9 +412,12 @@ test("v0.6 a finished run with no answer is never reported as still running", ()
 });
 
 test("v0.6 ask_supervisor asks the smallest question, and handles a refusal", () => {
-  assert.equal(askTitle("reviewer", "need_decision"), "Subagent reviewer needs a decision");
-  assert.equal(askTitle("scout", "clarify_scope"), "Subagent scout needs the scope clarified");
-  assert.equal(askTitle("worker", "missing_access"), "Subagent worker is missing access");
+  assert.equal(askTitle("reviewer", "need_decision", "Which database?"),
+    "Subagent reviewer needs a decision\n\nWhich database?\n\nReplying does not add tools or change access permissions.");
+  assert.equal(askTitle("scout", "clarify_scope", " Which files? ", "  Sources only.  "),
+    "Subagent scout needs the scope clarified\n\nWhich files?\n\nSources only.\n\nReplying does not add tools or change access permissions.");
+  assert.equal(askTitle("worker", "missing_access", "Which input file?", "  "),
+    "Subagent worker is missing access\n\nWhich input file?\n\nReplying does not add tools or change access permissions.");
 
   assert.equal(askBody("Which database?", "  "), "Which database?");
   assert.equal(askBody(" Which database? ", "Postgres is already a dependency."),
@@ -433,6 +436,28 @@ test("v0.6 ask_supervisor asks the smallest question, and handles a refusal", ()
   assert.ok(ASK_TOOL_DESCRIPTION.includes("costs the user an interruption"));
   assert.ok(!ASK_REASONS.includes("progress_update" as never), "no progress channel to a human");
   assert.ok(ASK_EXHAUSTED.includes(String(ASK_BUDGET)));
+});
+
+test("ask_supervisor keeps long, multiline questions and context in the visible title", () => {
+  const question = `Which resource?\n${"Details about the missing access. ".repeat(30)}END OF QUESTION`;
+  const context = "Already checked:\n- local files\n- agent tools\nEND OF CONTEXT";
+  assert.ok(question.length > 500);
+  assert.equal(askTitle("scout", "missing_access", question, context),
+    `Subagent scout is missing access\n\n${question}\n\n${context}\n\nReplying does not add tools or change access permissions.`);
+});
+
+test("access blockers are reported to the caller, not escalated as permission requests", () => {
+  for (const instructions of [ASK_TOOL_DESCRIPTION, childFraming(true), childFraming(false)]) {
+    assert.match(instructions, /tool or credential is unavailable/);
+    assert.match(instructions, /operation is denied/);
+    assert.match(instructions, /do not ask the user to grant access/);
+    assert.match(instructions, /report the resource, required tool, exact error \(redacting secrets\), and remaining work to the caller/);
+    assert.match(instructions, /Do not retry or bypass an access denial/);
+    assert.match(instructions, /reply does not add tools or change access permissions/);
+  }
+  assert.ok(ASK_TOOL_DESCRIPTION.includes("missing_access (a human choice of an authorised file or resource)"));
+  assert.ok(childFraming(true).includes("a choice of an authorised file or resource"));
+  assert.ok(!childFraming(true).includes("or missing access — call"));
 });
 
 test("v0.6 the ask tool must be on the allowlist, or it is silently dropped", () => {

@@ -137,13 +137,15 @@ For CI, set `PIFY_TRUST_PROJECT=1`. It is an environment variable rather than a 
 
 ## A child can ask instead of guessing
 
-A scoped child that hits a decision it should not be making — an unstated product, API or scope choice, or missing access — calls `ask_supervisor`, and the question reaches **you** through the usual dialog. Only when there is a UI to ask through: a headless run has nobody to answer, so the tool is deliberately not offered there — measured in `test/live/ask-wire.mjs` (the tool absent headless, `agent_run` still present). The offered-when-interactive half needs a TUI, which a scripted `-p` probe cannot see into; it is exercised by using it, not by a test that fakes it.
+A scoped child that hits a decision it should not be making — an unstated product, API or scope choice, or a choice of an authorised file or resource — calls `ask_supervisor`, and the question reaches **you** through the usual dialog. The question and context appear above the answer field, with a reminder that replying does not add tools or change access permissions. Only when there is a UI to ask through: a headless run has nobody to answer, so the tool is deliberately not offered there — measured in `test/live/ask-wire.mjs` (the tool absent headless, `agent_run` still present). The offered-when-interactive half needs a TUI, which a scripted `-p` probe cannot see into; it is exercised by using it, not by a test that fakes it.
 
-It reaches you rather than the parent agent for a structural reason: the parent is blocked inside the tool call that spawned the child, so it could not answer anyway. And the decision is yours regardless.
+Missing tools, unavailable credentials and denied operations are execution blockers, not decisions for this dialog. The child is instructed to finish what the brief authorises and report the resource, required tool, exact error (redacting secrets) and remaining work to the parent, without retrying or bypassing the denial. This is model guidance, not a new permission mechanism or a guarantee that a model will never ask unnecessarily.
+
+A genuine decision reaches you rather than the parent agent for a structural reason: the parent is blocked inside the tool call that spawned the child, so it could not answer anyway. And the decision is yours regardless.
 
 A declined question is not permission to guess. The child is told to finish what the brief authorises and report what it could not decide. Three questions per run, and there is deliberately no progress channel — a child's progress belongs in its report, not in an interruption.
 
-Measured across qwen3-235b, gpt-5.5 and claude-sonnet-4.5: six runs out of six asked rather than inventing an answer.
+The original decision-question framing was measured across qwen3-235b, gpt-5.5 and claude-sonnet-4.5: six runs out of six asked rather than inventing an answer. That measurement does not cover the revised access-blocker guidance.
 
 ## `@agent` at the prompt
 

@@ -24,25 +24,34 @@ export type AskReason = (typeof ASK_REASONS)[number];
 
 export const ASK_TOOL_NAME = "ask_supervisor";
 
+export const ACCESS_BOUNDARY = [
+  "If a required tool or credential is unavailable, or an operation is denied, do not ask the user to grant access.",
+  "Complete what the brief authorises and report the resource, required tool, exact error (redacting secrets), and remaining work to the caller.",
+  "Do not retry or bypass an access denial.",
+  "A human reply does not add tools or change access permissions.",
+].join(" ");
+
 export const ASK_TOOL_DESCRIPTION = [
   "Ask the person supervising this delegated task, and wait for their answer.",
   "Use it when continuing would mean inventing a decision that is theirs:",
   "need_decision (a product, API, or scope choice with no defensible default),",
   "clarify_scope (the brief admits two readings that lead to different work),",
-  "missing_access (a file, credential, or permission the task needs is not available).",
+  "missing_access (a human choice of an authorised file or resource).",
+  ACCESS_BOUNDARY,
   "Do not use it to report progress, to confirm something you can verify yourself,",
   "or to ask permission for work the brief already authorised. Each question costs",
   "the user an interruption, so ask the smallest question that unblocks you.",
 ].join(" ");
 
 /** How the question is shown, and what the child gets back. */
-export function askTitle(agent: string, reason: AskReason): string {
+export function askTitle(agent: string, reason: AskReason, question: string, context?: string): string {
   const label: Record<AskReason, string> = {
     need_decision: "needs a decision",
     clarify_scope: "needs the scope clarified",
     missing_access: "is missing access",
   };
-  return `Subagent ${agent} ${label[reason]}`;
+  // ui.input's placeholder is not a message; keep the question in its visible title.
+  return `Subagent ${agent} ${label[reason]}\n\n${askBody(question, context)}\n\nReplying does not add tools or change access permissions.`;
 }
 
 export function askBody(question: string, context: string | undefined): string {

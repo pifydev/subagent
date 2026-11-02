@@ -1,4 +1,5 @@
 import type { AgentDef, RunState } from "./types.ts";
+import { ACCESS_BOUNDARY } from "./ask.ts";
 import { outcomeLine } from "./outcome.ts";
 import { UNTRUSTED_REPORT_NOTE, neutralizeReport } from "./pending.ts";
 
@@ -50,6 +51,7 @@ const CHILD_BASE = [
   "end the report with a line reading exactly `OUTCOME: blocked` (a decision, access or",
   "information you do not have) or `OUTCOME: failed` (you tried and it does not work),",
   "so the caller does not have to infer it from your prose. Say nothing if it went fine.",
+  ACCESS_BOUNDARY,
 ].join(" ");
 
 /**
@@ -58,7 +60,8 @@ const CHILD_BASE = [
  * ask_supervisor tool is unreachable in practice: the base framing forbids
  * asking, and a model follows the prompt over a tool description.
  *
- * Measured across qwen3-235b, gpt-5.5 and claude-sonnet-4.5 on two framings
+ * The original decision exception was measured across qwen3-235b, gpt-5.5
+ * and claude-sonnet-4.5 on two framings
  * of an underspecified task: with the tool registered and this line present,
  * six runs out of six asked instead of inventing the answer.
  */
@@ -67,7 +70,7 @@ export function childFraming(canAsk: boolean): string {
   return [
     CHILD_BASE,
     "The one exception: if continuing would mean inventing a decision that belongs to the",
-    "supervisor — an unstated product/API/scope choice, or missing access — call ask_supervisor",
+    "supervisor — an unstated product/API/scope choice, or a choice of an authorised file or resource — call ask_supervisor",
     "and wait for the answer instead of guessing. Ask the smallest question that unblocks you.",
   ].join(" ");
 }

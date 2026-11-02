@@ -41,7 +41,6 @@ import {
   ASK_REASONS,
   ASK_TOOL_DESCRIPTION,
   ASK_TOOL_NAME,
-  askBody,
   askTitle,
   formatAnswer,
   type AskReason,
@@ -291,8 +290,8 @@ export default function subagent(pi: ExtensionAPI) {
                 questionsLeft--;
                 const answer = await withUiLock(() =>
                   ctx.ui.input(
-                    askTitle(def.name, params.reason),
-                    askBody(params.question, params.context).slice(0, 500),
+                    askTitle(def.name, params.reason, params.question, params.context),
+                    "Your answer",
                   ),
                 );
                 return {
